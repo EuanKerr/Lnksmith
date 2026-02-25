@@ -7,14 +7,21 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 
-from ._constants import HOTKEY_MOD, SW_MAXIMIZED, SW_MINIMIZED, SW_SHOWNORMAL, VK_KEYS
+from ._constants import (
+    HOTKEY_MOD,
+    HOTKEY_VK_VALID,
+    SW_SHOWMAXIMIZED,
+    SW_SHOWMINNOACTIVE,
+    SW_SHOWNORMAL,
+    VK_KEYS,
+)
 from .builder import build_lnk
 from .parser import LnkInfo, format_lnk, parse_lnk
 
 SHOW_MAP = {
     "normal": SW_SHOWNORMAL,
-    "maximized": SW_MAXIMIZED,
-    "minimized": SW_MINIMIZED,
+    "maximized": SW_SHOWMAXIMIZED,
+    "minimized": SW_SHOWMINNOACTIVE,
 }
 
 # Reverse lookups for --hotkey parsing
@@ -67,7 +74,42 @@ def _parse_hotkey(val: str) -> tuple[int, int]:
     if key_name not in _VK_NAMES:
         raise argparse.ArgumentTypeError(f"Unknown key: {key_name!r}")
 
-    return _VK_NAMES[key_name], mod_mask
+    vk = _VK_NAMES[key_name]
+    if vk not in HOTKEY_VK_VALID:
+        raise argparse.ArgumentTypeError(
+            f"Key {key_name!r} (0x{vk:02X}) is not valid for .lnk hotkeys "
+            f"(spec allows 0-9, A-Z, F1-F24, NUM LOCK, SCROLL LOCK)"
+        )
+    return vk, mod_mask
+
+
+def _parse_size(val: str) -> int:
+    """Parse a human-readable size string into bytes.
+
+    Accepts plain integers or suffixes: KB, MB, GB (powers of 1024).
+    Raises :class:`argparse.ArgumentTypeError` on invalid input.
+    """
+    try:
+        raw = val.strip().upper()
+        multipliers = {"KB": 1024, "MB": 1024**2, "GB": 1024**3}
+        for suffix, mult in multipliers.items():
+            if raw.endswith(suffix):
+                result = int(raw[: -len(suffix)].strip()) * mult
+                if result < 0:
+                    raise argparse.ArgumentTypeError(
+                        f"pad size must be non-negative, got {val!r}"
+                    )
+                return result
+        result = int(raw, 0)
+        if result < 0:
+            raise argparse.ArgumentTypeError(
+                f"pad size must be non-negative, got {val!r}"
+            )
+        return result
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"Invalid size: {val!r} (expected integer or suffix like 100MB, 1GB)"
+        ) from None
 
 
 def _derive_working_dir(target: str) -> str:
@@ -122,6 +164,30 @@ def _cmd_build(args: argparse.Namespace) -> None:
         cfg["hotkey_vk"] = vk
         cfg["hotkey_mod"] = mod
 
+    # Argument padding
+    if args.pad_args is not None:
+        if args.pad_args < 0:
+            sys.exit("Error: --pad-args must be non-negative")
+        cfg["pad_args"] = args.pad_args
+
+    # Binary padding
+    if args.pad_size is not None:
+        cfg["pad_size"] = args.pad_size
+
+    # Payload append (read file bytes)
+    if args.append is not None:
+        append_path = Path(args.append)
+        if not append_path.is_file():
+            sys.exit(f"Error: append file not found: {args.append}")
+        try:
+            cfg["append_data"] = append_path.read_bytes()
+        except OSError as exc:
+            sys.exit(f"Error: cannot read append file: {exc}")
+
+    # MotW stomp
+    if args.stomp_motw is not None:
+        cfg["stomp_motw"] = args.stomp_motw
+
     # Parse string timestamps into datetime/int
     for key in ("creation_time", "access_time", "write_time"):
         if key in cfg and isinstance(cfg[key], str):
@@ -134,6 +200,14 @@ def _cmd_build(args: argparse.Namespace) -> None:
         target = cfg["target"]
         if isinstance(target, str):
             cfg["working_dir"] = _derive_working_dir(target)
+
+    # Reject reserved FileAttributes bits at the CLI boundary (spec 2.1.2).
+    fa = cfg.get("file_attributes", 0x20)
+    if fa & 0x48:
+        sys.exit(
+            f"Error: file_attributes 0x{fa:08X} has reserved bits set "
+            f"(bits 3 and 6 MUST be zero per MS-SHLLINK section 2.1.2)"
+        )
 
     try:
         data = build_lnk(**cfg)
@@ -239,6 +313,32 @@ def main(argv: list[str] | None = None) -> None:
         "--known-folder",
         default=None,
         help="Known folder GUID or name (e.g. 'Desktop')",
+    )
+    bp.add_argument(
+        "--pad-args",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Prepend N whitespace chars to arguments (ZDI-CAN-25373)",
+    )
+    bp.add_argument(
+        "--pad-size",
+        type=_parse_size,
+        default=None,
+        metavar="SIZE",
+        help="Append null bytes to inflate file size (e.g. 100MB, 1GB)",
+    )
+    bp.add_argument(
+        "--append",
+        default=None,
+        metavar="FILE",
+        help="Append file content after terminal block (polyglot payload)",
+    )
+    bp.add_argument(
+        "--stomp-motw",
+        choices=["dot", "relative"],
+        default=None,
+        help="MotW bypass via malformed IDList paths (CVE-2024-38217)",
     )
 
     # -- parse --

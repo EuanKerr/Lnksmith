@@ -262,6 +262,12 @@ class TestHotkey:
         result = run_cli("build", r"C:\t.exe", "--hotkey", "C")
         assert result.returncode != 0
 
+    def test_hotkey_nonspec_key_rejected(self):
+        """CLI rejects keys not in the spec 2.1.3 normative VK code list."""
+        result = run_cli("build", r"C:\t.exe", "--hotkey", "CTRL+BACKSPACE")
+        assert result.returncode != 0
+        assert "not valid for .lnk hotkeys" in result.stderr
+
 
 # ---- --from-json tests ----
 
@@ -548,3 +554,154 @@ class TestBuildNewOptions:
         assert result.returncode == 0
         data = json.loads(result.stdout)
         assert data["device_name"] == "Z:"
+
+
+# ---- Red team enhancement CLI tests ----
+
+
+class TestPadArgs:
+    """CLI tests for --pad-args (ZDI-CAN-25373)."""
+
+    def test_pad_args_roundtrip(self, tmp_path):
+        out = tmp_path / "padded.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\cmd.exe",
+            "--arguments",
+            "/c calc.exe",
+            "--pad-args",
+            "300",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        result = run_cli("parse", "--json", str(out))
+        data = json.loads(result.stdout)
+        assert data["arguments"].startswith(" " * 300)
+        assert data["arguments"].endswith("/c calc.exe")
+
+
+class TestPadSize:
+    """CLI tests for --pad-size (binary padding / file bloating)."""
+
+    def test_pad_size_bytes(self, tmp_path):
+        out = tmp_path / "bloated.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\notepad.exe",
+            "--pad-size",
+            "4096",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        data = out.read_bytes()
+        # Build a baseline to compare
+        baseline = tmp_path / "baseline.lnk"
+        run_cli("build", r"C:\Windows\notepad.exe", "-o", str(baseline))
+        assert len(data) == len(baseline.read_bytes()) + 4096
+
+    def test_pad_size_mb_suffix(self, tmp_path):
+        out = tmp_path / "big.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\notepad.exe",
+            "--pad-size",
+            "1MB",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        assert out.stat().st_size > 1024 * 1024
+
+    def test_padded_file_parseable(self, tmp_path):
+        out = tmp_path / "padparse.lnk"
+        run_cli(
+            "build",
+            r"C:\Windows\notepad.exe",
+            "--pad-size",
+            "2048",
+            "-o",
+            str(out),
+        )
+        result = run_cli("parse", "--json", str(out))
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["target_path"] == r"C:\Windows\notepad.exe"
+
+
+class TestAppend:
+    """CLI tests for --append (polyglot payload)."""
+
+    def test_append_file_content(self, tmp_path):
+        payload = tmp_path / "payload.hta"
+        payload.write_text("<html><body>test</body></html>")
+        out = tmp_path / "poly.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--append",
+            str(payload),
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        data = out.read_bytes()
+        assert data.endswith(b"<html><body>test</body></html>")
+
+    def test_appended_file_parseable(self, tmp_path):
+        payload = tmp_path / "payload.txt"
+        payload.write_bytes(b"X" * 500)
+        out = tmp_path / "appparse.lnk"
+        run_cli(
+            "build",
+            r"C:\Windows\notepad.exe",
+            "--append",
+            str(payload),
+            "-o",
+            str(out),
+        )
+        result = run_cli("parse", "--json", str(out))
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["target_path"] == r"C:\Windows\notepad.exe"
+
+
+class TestStompMotW:
+    """CLI tests for --stomp-motw (CVE-2024-38217)."""
+
+    def test_stomp_dot(self, tmp_path):
+        out = tmp_path / "stomp.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\powershell.exe",
+            "--stomp-motw",
+            "dot",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        data = out.read_bytes()
+        assert b"powershell.exe." in data
+
+    def test_stomp_relative(self, tmp_path):
+        out = tmp_path / "stomp_rel.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\cmd.exe",
+            "--stomp-motw",
+            "relative",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        assert out.exists()
+
+    def test_stomp_invalid_rejected(self):
+        result = run_cli(
+            "build",
+            r"C:\t.exe",
+            "--stomp-motw",
+            "invalid",
+        )
+        assert result.returncode != 0

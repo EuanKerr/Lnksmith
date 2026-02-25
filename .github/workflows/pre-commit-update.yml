@@ -1,0 +1,64 @@
+name: Update pre-commit hooks
+
+on:
+  schedule:
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7.3.0
+
+      - run: uv python install ${{ vars.PYTHON_VERSION }}
+
+      - run: uv tool install pre-commit
+
+      - name: Update hooks and pin by commit hash
+        run: |
+          pre-commit autoupdate
+          # Re-resolve tag revs to full commit hashes for supply-chain safety.
+          python3 -c "
+          import re, subprocess, pathlib
+          cfg = pathlib.Path('.pre-commit-config.yaml')
+          text = cfg.read_text()
+          def resolve(m):
+              repo = m.group(1)
+              tag = m.group(2)
+              try:
+                  sha = subprocess.check_output(
+                      ['git', 'ls-remote', repo, f'refs/tags/{tag}'],
+                      text=True
+                  ).split()[0]
+                  return f'repo: {repo}\n    rev: {sha} # {tag}'
+              except Exception:
+                  return m.group(0)
+          text = re.sub(
+              r'repo: (https://[^\n]+)\n    rev: ([^\s#]+)',
+              resolve, text
+          )
+          cfg.write_text(text)
+          "
+
+      - name: Create PR if hooks changed
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git diff --quiet && exit 0
+          BRANCH="auto/pre-commit-update"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "$BRANCH"
+          git add .pre-commit-config.yaml
+          git commit -m "Update pre-commit hooks"
+          git push -f origin "$BRANCH"
+          gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number' | grep -q . \
+            || gh pr create --head "$BRANCH" --base main --title "Update pre-commit hooks" \
+               --body "Automated pre-commit autoupdate."

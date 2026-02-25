@@ -37,10 +37,10 @@ EXT_HEADER_SIZE = 46  # fixed header before unicode name in v9
 # ShowWindow commands (MS-SHLLINK 2.1.1)
 # ---------------------------------------------------------------------------
 SW_SHOWNORMAL = 1
-SW_MAXIMIZED = 3
-SW_MINIMIZED = 7
+SW_SHOWMAXIMIZED = 3
+SW_SHOWMINNOACTIVE = 7
 
-SHOW_CMD = {1: "SW_SHOWNORMAL", 3: "SW_MAXIMIZED", 7: "SW_MINIMIZED"}
+SHOW_CMD = {1: "SW_SHOWNORMAL", 3: "SW_SHOWMAXIMIZED", 7: "SW_SHOWMINNOACTIVE"}
 
 # ---------------------------------------------------------------------------
 # LinkFlags bit names
@@ -128,6 +128,15 @@ VK_KEYS = {
     0x91: "SCROLL LOCK",
 }
 
+# Valid HotKey virtual key codes per MS-SHLLINK section 2.1.3.
+# This is the normative set; VK_KEYS above is a superset used for parser display.
+HOTKEY_VK_VALID = (
+    frozenset(range(0x30, 0x3A))  # 0-9
+    | frozenset(range(0x41, 0x5B))  # A-Z
+    | frozenset(range(0x70, 0x88))  # F1-F24
+    | {0x90, 0x91}  # NUM LOCK, SCROLL LOCK
+)
+
 # ---------------------------------------------------------------------------
 # Drive types (VolumeID)
 # ---------------------------------------------------------------------------
@@ -161,6 +170,10 @@ EXTRA_SIGS = {
 # ---------------------------------------------------------------------------
 # WNNC_NET_* Network Provider Types (CommonNetworkRelativeLink)
 # ---------------------------------------------------------------------------
+# Note: Entries below 0x001A0000 (LANMAN, NETWARE, 9TILES, LOCUS, SUN_PC_NFS,
+# LANSTEP, CLEARCASE, FRONTIER, BMC, DCE, PATHWORKS, MANAGEWARE, OBJECT_DIRE)
+# are not in the MS-SHLLINK v10.0 normative table (section 2.3.2) but appear
+# in real-world .lnk files and earlier spec revisions.
 WNNC_NET_TYPES = {
     0x00020000: "WNNC_NET_LANMAN",
     0x00030000: "WNNC_NET_NETWARE",

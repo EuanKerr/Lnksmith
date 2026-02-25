@@ -1,8 +1,8 @@
-# Lnksmith
+# LNKsmith
 
-Build and parse Windows `.lnk` shortcut files in pure Python.
+Build and parse Windows `.lnk` shortcut files in Python.
 
-Implements the [MS-SHLLINK] specification with zero dependencies -- just the
+Implements the [MS-SHLLINK] specification using the
 standard library `struct` module. Runs on any platform; the resulting `.lnk`
 files are valid on Windows.
 
@@ -36,7 +36,7 @@ lnksmith build "C:\Windows\notepad.exe" \
     --show normal
 ```
 
-The target path is positional -- no `--target` flag needed. The working
+The target path is positional - no `--target` flag needed. The working
 directory is auto-derived from the target's parent (here `C:\Windows`) unless
 you override it with `--working-dir`.
 
@@ -62,6 +62,10 @@ you override it with `--working-dir`.
 | `--access-time`            | AccessTime (ISO 8601 or FILETIME ticks)                     |
 | `--write-time`             | WriteTime (ISO 8601 or FILETIME ticks)                      |
 | `--known-folder`           | Known folder GUID or name (e.g. `Desktop`)                  |
+| `--pad-args`               | Prepend N whitespace chars to arguments (ZDI-CAN-25373)     |
+| `--pad-size`               | Append null bytes to inflate file size (e.g. `100MB`)       |
+| `--append`                 | Append file content after terminal block (polyglot)         |
+| `--stomp-motw`             | MotW bypass: `dot` or `relative` (CVE-2024-38217)           |
 
 **JSON-only fields** (via `--from-json`):
 
@@ -118,9 +122,9 @@ lnksmith build "C:\Tools\terminal.exe" \
     -o terminal.lnk
 ```
 
-Supported modifier names: `SHIFT`, `CTRL`, `ALT`. Key names include `A`-`Z`,
-`0`-`9`, `F1`-`F24`, `NUMPAD0`-`NUMPAD9`, and special keys like `BACKSPACE`,
-`TAB`, `ENTER`, `SPACE`, `DELETE`, etc.
+Supported modifier names: `SHIFT`, `CTRL`, `ALT`. Key names: `A`-`Z`,
+`0`-`9`, `F1`-`F24`, `NUM LOCK`, `SCROLL LOCK` (per MS-SHLLINK section 2.1.3).
+The Python API (`build_lnk`) accepts any VK code with a warning for non-spec values.
 
 Icon from an environment-variable path with a custom index:
 
@@ -171,6 +175,13 @@ print(format_lnk(info))
 from dataclasses import asdict
 print(asdict(info))
 ```
+
+## Red Team Usage
+
+See [docs/redteam.md](docs/redteam.md) for offensive tradecraft patterns
+including argument padding (ZDI-CAN-25373), LOLBin proxy execution, LNK/HTA
+polyglots, binary padding, MotW bypass (CVE-2024-38217), NTLM hash theft,
+icon masquerading, tracker spoofing, and persistence techniques.
 
 ## License
 

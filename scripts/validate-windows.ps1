@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 
-# validate_lnk.ps1 -- Validate .lnk files using Windows Shell COM objects.
+# validate_lnk.ps1 - Validate .lnk files using Windows Shell COM objects.
 #
 # Usage:
 #   powershell.exe -ExecutionPolicy Bypass -File validate_lnk.ps1 <file.lnk> [file2.lnk ...]
@@ -116,7 +116,7 @@ function Format-LnkResult {
 
 # --- Main ---
 Write-Host ''
-Write-Host 'LNK Validator -- WScript.Shell COM (ground truth)' -ForegroundColor White
+Write-Host 'LNK Validator - WScript.Shell COM (ground truth)' -ForegroundColor White
 
 $lnkFiles = @()
 if ($PSCmdlet.ParameterSetName -eq 'ByDir') {

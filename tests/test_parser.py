@@ -369,6 +369,35 @@ class TestReservedFieldValidation:
             assert not any("Reserved" in str(warning.message) for warning in w)
 
 
+class TestFileAttributesReservedBitsParser:
+    """Spec 2.1.2: FileAttributes bits 3 and 6 are reserved, MUST be zero."""
+
+    def test_reserved_bits_warn(self):
+        import struct
+        import warnings
+
+        from lnksmith.builder import build_lnk
+
+        data = bytearray(build_lnk(target=r"C:\t.exe"))
+        # Patch FileAttributes (offset 24) to set reserved bit 3
+        struct.pack_into("<I", data, 24, 0x28)  # ARCHIVE | bit 3
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            parse_lnk(bytes(data))
+        assert any("reserved bits" in str(x.message) for x in w)
+
+    def test_no_reserved_bits_no_warning(self):
+        import warnings
+
+        from lnksmith.builder import build_lnk
+
+        data = build_lnk(target=r"C:\t.exe")
+        with warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            parse_lnk(data)
+        assert not any("reserved bits" in str(x.message) for x in w)
+
+
 class TestParseDarwinDataBlock:
     """GAP-2: DarwinDataBlock parsing."""
 

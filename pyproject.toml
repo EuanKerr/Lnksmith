@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "lnksmith"
 dynamic = ["version"]
-description = "Build and parse Windows .lnk files (MS-SHLLINK) -- pure Python, zero dependencies"
+description = "Build and parse Windows .lnk files (MS-SHLLINK) in Python."
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
@@ -30,9 +30,9 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/EuanKerr/lnksmith"
-Repository = "https://github.com/EuanKerr/lnksmith"
-Issues = "https://github.com/EuanKerr/lnksmith/issues"
+Homepage = "https://github.com/EuanKerr/LNKsmith"
+Repository = "https://github.com/EuanKerr/LNKsmith"
+Issues = "https://github.com/EuanKerr/LNKsmith/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "pre-commit"]

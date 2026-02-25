@@ -2,7 +2,7 @@
 
 import pytest
 
-from lnksmith._constants import SW_MAXIMIZED, SW_MINIMIZED, SW_SHOWNORMAL
+from lnksmith._constants import SW_SHOWMAXIMIZED, SW_SHOWMINNOACTIVE, SW_SHOWNORMAL
 from lnksmith.builder import build_lnk
 from lnksmith.parser import parse_lnk
 
@@ -59,8 +59,8 @@ class TestRoundtripShowCommand:
         "cmd,name",
         [
             (SW_SHOWNORMAL, "SW_SHOWNORMAL"),
-            (SW_MAXIMIZED, "SW_MAXIMIZED"),
-            (SW_MINIMIZED, "SW_MINIMIZED"),
+            (SW_SHOWMAXIMIZED, "SW_SHOWMAXIMIZED"),
+            (SW_SHOWMINNOACTIVE, "SW_SHOWMINNOACTIVE"),
         ],
     )
     def test_show_command_roundtrip(self, cmd, name):

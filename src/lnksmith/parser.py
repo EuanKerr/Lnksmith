@@ -443,6 +443,14 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
     if mod_parts or vk_name:
         info.hotkey_str = "+".join(mod_parts + ([vk_name] if vk_name else []))
 
+    # Spec 2.1.2: FileAttributes bits 3 and 6 are reserved, MUST be zero.
+    if info.file_attributes & 0x48:
+        warnings.warn(
+            f"FileAttributes 0x{info.file_attributes:08X} has reserved bits set "
+            f"(bits 3 and 6 MUST be zero per spec section 2.1.2)",
+            stacklevel=2,
+        )
+
     # GAP-11: Reserved fields MUST be zero (section 2.1)
     _reserved1 = _read_u16(data, 66)
     _reserved2 = _read_u32(data, 68)
@@ -831,7 +839,10 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
             info.tracker_birth_droid_file_id = bfile
 
         elif sig == 0xA000000C and block_size > 10:
-            # VistaAndAboveIDListDataBlock: embedded IDList
+            # VistaAndAboveIDListDataBlock: embedded IDList.
+            # Spec 2.5.11 says offset +8 is "An IDList structure (2.2.1)"
+            # which has no size prefix, but the min BlockSize of 0x0A
+            # implies a uint16 size prefix matching LinkTargetIDList (2.2).
             idlist_size = _read_u16(data, pos + 8)
             idlist_start = pos + 10
             idlist_end = min(idlist_start + idlist_size, pos + block_size)
