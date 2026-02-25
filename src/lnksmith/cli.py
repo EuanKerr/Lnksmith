@@ -135,7 +135,10 @@ def _cmd_build(args: argparse.Namespace) -> None:
         if isinstance(target, str):
             cfg["working_dir"] = _derive_working_dir(target)
 
-    data = build_lnk(**cfg)
+    try:
+        data = build_lnk(**cfg)
+    except TypeError as exc:
+        sys.exit(f"Error: {exc}\nCheck JSON keys against: lnksmith build --help")
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_bytes(data)

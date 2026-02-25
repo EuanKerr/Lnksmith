@@ -104,6 +104,15 @@ class TestParseErrors:
         with pytest.raises(FormatError, match="Invalid header size"):
             parse_lnk(bytes(bad))
 
+    def test_invalid_clsid(self):
+        from lnksmith.builder import build_lnk
+
+        data = bytearray(build_lnk(target=r"C:\t.exe"))
+        # Corrupt the CLSID (bytes 4-19)
+        data[4:20] = b"\x00" * 16
+        with pytest.raises(FormatError, match="Invalid LinkCLSID"):
+            parse_lnk(bytes(data))
+
 
 class TestFormatLnk:
     """Verify the human-readable formatter produces output."""

@@ -483,6 +483,22 @@ class TestRoundtripVolumeMetadata:
         assert info.drive_type == 2
 
 
+class TestRoundtripUNCUnicodeSuffix:
+    """Fix 1a: UNC path common_path uses Unicode suffix when available."""
+
+    def test_unc_common_path_from_unicode_suffix(self):
+        data = build_lnk(target=r"\\server\share\subdir\deep\file.txt")
+        info = parse_lnk(data)
+        assert info.common_path == r"subdir\deep\file.txt"
+        assert info.target_path == r"\\server\share\subdir\deep\file.txt"
+
+    def test_unc_single_segment_suffix(self):
+        data = build_lnk(target=r"\\server\share\readme.txt")
+        info = parse_lnk(data)
+        assert info.common_path == "readme.txt"
+        assert info.target_path == r"\\server\share\readme.txt"
+
+
 class TestRoundtripCNR:
     """GAP-E/F/G: CNR Unicode, device name, and provider type."""
 

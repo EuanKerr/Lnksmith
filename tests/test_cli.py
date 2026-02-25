@@ -518,6 +518,21 @@ class TestBuildNewOptions:
         data = json.loads(result.stdout)
         assert data["volume_label"] == "TESTDISK"
 
+    def test_json_unknown_key_shows_error(self, tmp_path):
+        out = tmp_path / "bad.lnk"
+        cfg = _write_json(tmp_path, {"bogus_key": "nope"})
+        result = run_cli(
+            "build",
+            r"C:\t.exe",
+            "-o",
+            str(out),
+            "-j",
+            cfg,
+        )
+        assert result.returncode != 0
+        assert "Error" in result.stderr
+        assert "lnksmith build --help" in result.stderr
+
     def test_parse_network_device_roundtrip(self, tmp_path):
         lnk = tmp_path / "net.lnk"
         cfg = _write_json(tmp_path, {"network_device_name": "Z:"})

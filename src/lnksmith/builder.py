@@ -12,6 +12,7 @@ from ._constants import (
     EXT_HEADER_SIZE,
     EXT_SIG,
     EXT_VERSION,
+    FILETIME_UNIX_EPOCH_DELTA,
     KNOWN_FOLDER_GUIDS,
     LINK_CLSID,
     SW_SHOWNORMAL,
@@ -57,7 +58,7 @@ def _to_dos_datetime(val: Timestamp = None) -> tuple[int, int]:
     if val is None:
         dt = datetime.now(UTC)
     elif isinstance(val, int):
-        unix_ts = (val - 116444736000000000) / 10_000_000
+        unix_ts = (val - FILETIME_UNIX_EPOCH_DELTA) / 10_000_000
         dt = datetime.fromtimestamp(unix_ts, tz=UTC)
     elif isinstance(val, datetime):
         if val.tzinfo is None:
@@ -208,34 +209,11 @@ def _id_fs_entry(
     return struct.pack("<H", len(body) + 2) + body
 
 
-def _build_idlist(
-    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+def _build_fs_items(
+    path_parts: list, file_size: int = 0, write_time: Timestamp = None
 ) -> bytes:
-    """Full LinkTargetIDList section for an absolute Windows path.
-
-    Args:
-        target_path: Absolute Windows path. Each component can be a plain
-                     string or a (short_name, long_name) tuple for 8.3
-                     short name support.
-        file_size:   Size of the target file (applied to the final entry).
-        write_time:  Optional timestamp for IDList items (None, int, or datetime).
-    """
+    """Build filesystem shell items for a sequence of path segments."""
     items = bytearray()
-    items += _id_root()
-
-    # Accept either a plain path string or pre-split list of segments
-    if isinstance(target_path, str):
-        parts = target_path.replace("/", "\\").split("\\")
-        drive = parts[0].rstrip(":")
-        path_parts = [p for p in parts[1:] if p]
-    else:
-        # target_path is a list: first element is drive letter, rest are
-        # path segments (str or (short, long) tuples)
-        drive = target_path[0]
-        path_parts = target_path[1:]
-
-    items += _id_drive(drive)
-
     for i, segment in enumerate(path_parts):
         is_dir = i < len(path_parts) - 1
         entry_size = file_size if not is_dir else 0
@@ -252,7 +230,38 @@ def _build_idlist(
             items += _id_fs_entry(
                 segment, is_dir, file_size=entry_size, write_time=write_time
             )
+    return bytes(items)
 
+
+def _parse_target_path(target_path: TargetPath) -> tuple[str, list]:
+    """Split a TargetPath into (drive_letter, path_parts)."""
+    if isinstance(target_path, str):
+        parts = target_path.replace("/", "\\").split("\\")
+        drive = parts[0].rstrip(":")
+        path_parts = [p for p in parts[1:] if p]
+    else:
+        drive = target_path[0]
+        path_parts = list(target_path[1:])
+    return drive, path_parts
+
+
+def _build_idlist(
+    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+) -> bytes:
+    """Full LinkTargetIDList section for an absolute Windows path.
+
+    Args:
+        target_path: Absolute Windows path. Each component can be a plain
+                     string or a (short_name, long_name) tuple for 8.3
+                     short name support.
+        file_size:   Size of the target file (applied to the final entry).
+        write_time:  Optional timestamp for IDList items (None, int, or datetime).
+    """
+    drive, path_parts = _parse_target_path(target_path)
+    items = bytearray()
+    items += _id_root()
+    items += _id_drive(drive)
+    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
     items += struct.pack("<H", 0)  # terminator
     return struct.pack("<H", len(items)) + items
 
@@ -273,24 +282,7 @@ def _build_idlist_unc(
     items = bytearray()
     items += _id_network_root()
     items += _id_network_share(share_path)
-
-    for i, segment in enumerate(fs_parts):
-        is_dir = i < len(fs_parts) - 1
-        entry_size = file_size if not is_dir else 0
-        if isinstance(segment, tuple):
-            short_name, long_name = segment
-            items += _id_fs_entry(
-                short_name,
-                is_dir,
-                file_size=entry_size,
-                long_name=long_name,
-                write_time=write_time,
-            )
-        else:
-            items += _id_fs_entry(
-                segment, is_dir, file_size=entry_size, write_time=write_time
-            )
-
+    items += _build_fs_items(fs_parts, file_size=file_size, write_time=write_time)
     items += struct.pack("<H", 0)  # terminator
     return struct.pack("<H", len(items)) + items
 
@@ -302,36 +294,11 @@ def _build_idlist_items(
 
     Used by VistaAndAboveIDListDataBlock builder.
     """
+    drive, path_parts = _parse_target_path(target_path)
     items = bytearray()
     items += _id_root()
-
-    if isinstance(target_path, str):
-        parts = target_path.replace("/", "\\").split("\\")
-        drive = parts[0].rstrip(":")
-        path_parts = [p for p in parts[1:] if p]
-    else:
-        drive = target_path[0]
-        path_parts = target_path[1:]
-
     items += _id_drive(drive)
-
-    for i, segment in enumerate(path_parts):
-        is_dir = i < len(path_parts) - 1
-        entry_size = file_size if not is_dir else 0
-        if isinstance(segment, tuple):
-            short_name, long_name = segment
-            items += _id_fs_entry(
-                short_name,
-                is_dir,
-                file_size=entry_size,
-                long_name=long_name,
-                write_time=write_time,
-            )
-        else:
-            items += _id_fs_entry(
-                segment, is_dir, file_size=entry_size, write_time=write_time
-            )
-
+    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
     items += struct.pack("<H", 0)  # terminator
     return bytes(items)
 
@@ -495,40 +462,26 @@ def _build_linkinfo_unc(
 # ---------------------------------------------------------------------------
 # ExtraData blocks
 # ---------------------------------------------------------------------------
-def _build_icon_env_block(icon_env_path: str) -> bytes:
-    """IconEnvironmentDataBlock (sig 0xA0000007).
-
-    788 bytes: 4 size + 4 sig + 260 ANSI + 520 Unicode.
-    Provides the icon path using environment variables like %ProgramFiles%.
-    """
+def _build_788_block(sig: int, value: str) -> bytes:
+    """Fixed-size 788-byte ExtraData block (4 size + 4 sig + 260 ANSI + 520 Unicode)."""
     block = bytearray(788)
-    struct.pack_into("<I", block, 0, 788)  # size
-    struct.pack_into("<I", block, 4, 0xA0000007)  # signature
-    # TargetAnsi (260 bytes at offset 8) -- truncate to fit slot
-    ansi = icon_env_path[:259].encode(ANSI_CODEPAGE) + b"\x00"
+    struct.pack_into("<I", block, 0, 788)
+    struct.pack_into("<I", block, 4, sig)
+    ansi = value[:259].encode(ANSI_CODEPAGE) + b"\x00"
     block[8 : 8 + len(ansi)] = ansi
-    # TargetUnicode (520 bytes at offset 268) -- truncate to fit slot
-    uni = icon_env_path[:259].encode("utf-16-le") + b"\x00\x00"
+    uni = value[:259].encode("utf-16-le") + b"\x00\x00"
     block[268 : 268 + len(uni)] = uni
     return bytes(block)
+
+
+def _build_icon_env_block(icon_env_path: str) -> bytes:
+    """IconEnvironmentDataBlock (sig 0xA0000007)."""
+    return _build_788_block(0xA0000007, icon_env_path)
 
 
 def _build_env_var_block(env_path: str) -> bytes:
-    """EnvironmentVariableDataBlock (sig 0xA0000001).
-
-    788 bytes: 4 size + 4 sig + 260 ANSI + 520 Unicode.
-    Provides the target path using environment variables for resolution.
-    """
-    block = bytearray(788)
-    struct.pack_into("<I", block, 0, 788)  # size
-    struct.pack_into("<I", block, 4, 0xA0000001)  # signature
-    # TargetAnsi (260 bytes at offset 8) -- truncate to fit slot
-    ansi = env_path[:259].encode(ANSI_CODEPAGE) + b"\x00"
-    block[8 : 8 + len(ansi)] = ansi
-    # TargetUnicode (520 bytes at offset 268) -- truncate to fit slot
-    uni = env_path[:259].encode("utf-16-le") + b"\x00\x00"
-    block[268 : 268 + len(uni)] = uni
-    return bytes(block)
+    """EnvironmentVariableDataBlock (sig 0xA0000001)."""
+    return _build_788_block(0xA0000001, env_path)
 
 
 def _build_tracker_block(
@@ -677,20 +630,8 @@ def _serialize_property(prop: dict[str, object]) -> bytes:
 
 
 def _build_darwin_block(darwin_data: str) -> bytes:
-    """DarwinDataBlock (sig 0xA0000006).
-
-    788 bytes: 4 size + 4 sig + 260 ANSI + 520 Unicode.
-    Identical layout to EnvironmentVariableDataBlock.
-    """
-    block = bytearray(788)
-    struct.pack_into("<I", block, 0, 788)  # size
-    struct.pack_into("<I", block, 4, 0xA0000006)  # signature
-    # Truncate to fit fixed-size slots (259 chars + null terminator)
-    ansi = darwin_data[:259].encode(ANSI_CODEPAGE) + b"\x00"
-    block[8 : 8 + len(ansi)] = ansi
-    uni = darwin_data[:259].encode("utf-16-le") + b"\x00\x00"
-    block[268 : 268 + len(uni)] = uni
-    return bytes(block)
+    """DarwinDataBlock (sig 0xA0000006)."""
+    return _build_788_block(0xA0000006, darwin_data)
 
 
 def _build_console_fe_block(codepage: int) -> bytes:

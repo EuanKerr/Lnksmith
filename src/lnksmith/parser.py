@@ -1,6 +1,7 @@
 """Parse Windows .lnk files (MS-SHLLINK) into structured data."""
 
 import struct
+import warnings
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -10,9 +11,11 @@ from ._constants import (
     DRIVE_TYPES,
     EXTRA_SIGS,
     FILE_ATTR_NAMES,
+    FILETIME_UNIX_EPOCH_DELTA,
     FLAG_NAMES,
     HOTKEY_MOD,
     KNOWN_FOLDER_NAMES,
+    LINK_CLSID,
     PROPERTY_SET_GUIDS,
     SHOW_CMD,
     VK_KEYS,
@@ -66,7 +69,7 @@ def _filetime_to_str(data: bytes, off: int) -> str:
     ft = struct.unpack_from("<Q", data, off)[0]
     if ft == 0:
         return "0 (unset)"
-    unix_ts = (ft - 116444736000000000) / 10000000
+    unix_ts = (ft - FILETIME_UNIX_EPOCH_DELTA) / 10_000_000
     try:
         dt = datetime.fromtimestamp(unix_ts, tz=UTC)
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
@@ -236,9 +239,9 @@ def _parse_idlist_item(data: bytes, off: int, idx: int) -> tuple[int, IdItem | N
     elif type_byte in (0x31, 0x32, 0x35, 0x36):
         kind = "Dir" if type_byte in (0x31, 0x35) else "File"
         fsize = struct.unpack_from("<I", body, 2)[0] if len(body) >= 6 else 0
-        date_w = _read_u16(data, off + 2 + 6) if len(body) >= 8 else 0
-        time_w = _read_u16(data, off + 2 + 8) if len(body) >= 10 else 0
-        attrs = _read_u16(data, off + 2 + 10) if len(body) >= 12 else 0
+        date_w = struct.unpack_from("<H", body, 6)[0] if len(body) >= 8 else 0
+        time_w = struct.unpack_from("<H", body, 8)[0] if len(body) >= 10 else 0
+        attrs = struct.unpack_from("<H", body, 10)[0] if len(body) >= 12 else 0
 
         name_start = 12
         name_end = body.find(b"\x00", name_start)
@@ -411,6 +414,9 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
     if hdr_size != 0x4C:
         raise FormatError(f"Invalid header size 0x{hdr_size:08X} (expected 0x4C)")
 
+    if data[4:20] != LINK_CLSID:
+        raise FormatError("Invalid LinkCLSID (not a .lnk file)")
+
     info.flags = _read_u32(data, 20)
     info.flag_names = _decode_flags(info.flags)
     info.file_attributes = _read_u32(data, 24)
@@ -442,8 +448,6 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
     _reserved2 = _read_u32(data, 68)
     _reserved3 = _read_u32(data, 72)
     if _reserved1 or _reserved2 or _reserved3:
-        import warnings
-
         warnings.warn(
             f"Header Reserved fields not zero: "
             f"Reserved1=0x{_reserved1:04X} Reserved2=0x{_reserved2:08X} "
@@ -483,8 +487,6 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
             vol_size = _read_u32(data, vol_pos)
             # GAP-13: VolumeIDSize MUST be > 0x10
             if vol_size <= 0x10:
-                import warnings
-
                 warnings.warn(
                     f"VolumeIDSize 0x{vol_size:08X} violates spec "
                     f"(MUST be > 0x00000010)",
@@ -549,8 +551,6 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
             cnr_size = _read_u32(data, cnr_pos)
             # GAP-15: CommonNetworkRelativeLinkSize MUST be >= 0x14
             if cnr_size < 0x14:
-                import warnings
-
                 warnings.warn(
                     f"CommonNetworkRelativeLinkSize 0x{cnr_size:08X} violates "
                     f"spec (MUST be >= 0x00000014)",
@@ -595,13 +595,21 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
                             data, cnr_pos + uni_dev_off, cnr_size - uni_dev_off
                         )
 
-            # CommonPathSuffix
+            # CommonPathSuffix (ANSI)
             if suffix_off > 0 and pos + suffix_off < pos + li_size:
                 info.common_path = (
                     data[pos + suffix_off : pos + li_size]
                     .split(b"\x00")[0]
                     .decode(ANSI_CODEPAGE, errors="replace")
                 )
+
+            # CommonPathSuffixUnicode when header size >= 0x24
+            if li_hdr_size >= 0x24:
+                uni_suffix_off = _read_u32(data, pos + 32)
+                if uni_suffix_off > 0 and pos + uni_suffix_off < pos + li_size:
+                    info.common_path = decode_utf16le_at(
+                        data, pos + uni_suffix_off, li_size - uni_suffix_off
+                    )
 
             # Compose target path from UNC share + suffix
             info.target_path = info.network_share_name
@@ -764,8 +772,6 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
         elif sig == 0xA0000008 and block_size >= 8:
             # GAP-I: ShimDataBlock minimum size validation
             if block_size < 0x88:
-                import warnings
-
                 warnings.warn(
                     f"ShimDataBlock BlockSize 0x{block_size:08X} violates "
                     f"spec (MUST be >= 0x00000088)",
@@ -791,16 +797,12 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
             tracker_length = _read_u32(data, pos + 8)
             tracker_version = _read_u32(data, pos + 12)
             if tracker_length != 0x58:
-                import warnings
-
                 warnings.warn(
                     f"TrackerDataBlock Length 0x{tracker_length:08X} "
                     f"violates spec (MUST be 0x00000058)",
                     stacklevel=2,
                 )
             if tracker_version != 0:
-                import warnings
-
                 warnings.warn(
                     f"TrackerDataBlock Version {tracker_version} "
                     f"violates spec (MUST be 0)",
