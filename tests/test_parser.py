@@ -25,9 +25,10 @@ class TestParseBasic:
 
     def test_timestamps_present(self, simple_lnk_bytes):
         info = parse_lnk(simple_lnk_bytes)
-        assert "UTC" in info.creation_time
-        assert "UTC" in info.access_time
-        assert "UTC" in info.write_time
+        # Timestamps are now raw FILETIME ticks (int); non-zero means present
+        assert info.creation_time > 0
+        assert info.access_time > 0
+        assert info.write_time > 0
 
     def test_show_command_default(self, simple_lnk_bytes):
         info = parse_lnk(simple_lnk_bytes)

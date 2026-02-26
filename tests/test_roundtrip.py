@@ -402,6 +402,8 @@ class TestRoundtripTimestamps:
         from datetime import datetime, timezone
 
         ts = datetime(2020, 6, 15, 12, 30, 0, tzinfo=timezone.utc)
+        # 2020-06-15 12:30:00 UTC = 132366978000000000 ticks
+        expected_ticks = 132366978000000000
         data = build_lnk(
             target=r"C:\t.exe",
             creation_time=ts,
@@ -409,23 +411,22 @@ class TestRoundtripTimestamps:
             write_time=ts,
         )
         info = parse_lnk(data)
-        assert info.creation_time == "2020-06-15 12:30:00 UTC"
-        assert info.access_time == "2020-06-15 12:30:00 UTC"
-        assert info.write_time == "2020-06-15 12:30:00 UTC"
+        assert info.creation_time == expected_ticks
+        assert info.access_time == expected_ticks
+        assert info.write_time == expected_ticks
 
     def test_int_filetime_ticks(self):
         # 2020-01-01 00:00:00 UTC = 132223104000000000 ticks
         ticks = 132223104000000000
         data = build_lnk(target=r"C:\t.exe", creation_time=ticks)
         info = parse_lnk(data)
-        assert info.creation_time == "2020-01-01 00:00:00 UTC"
+        assert info.creation_time == ticks
 
     def test_none_uses_current_time(self):
         data = build_lnk(target=r"C:\t.exe")
         info = parse_lnk(data)
-        # Default should produce a recent timestamp, not "0 (unset)"
-        assert "UTC" in info.creation_time
-        assert "unset" not in info.creation_time
+        # Default should produce a recent, non-zero timestamp
+        assert info.creation_time > 0
 
     def test_independent_timestamps(self):
         from datetime import datetime, timezone
@@ -440,9 +441,11 @@ class TestRoundtripTimestamps:
             write_time=t3,
         )
         info = parse_lnk(data)
-        assert "2019-01-01" in info.creation_time
-        assert "2021-06-15" in info.access_time
-        assert "2023-12-31" in info.write_time
+        # All three timestamps should be different FILETIME tick values
+        assert info.creation_time != info.access_time
+        assert info.access_time != info.write_time
+        # Verify ordering: t1 < t2 < t3
+        assert info.creation_time < info.access_time < info.write_time
 
 
 class TestRoundtripVolumeMetadata:

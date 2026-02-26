@@ -506,7 +506,10 @@ class TestBuildNewOptions:
         result = run_cli("parse", "--json", str(lnk))
         assert result.returncode == 0
         data = json.loads(result.stdout)
-        assert "2020-06-15" in data["creation_time"]
+        # creation_time is now raw FILETIME ticks (int); verify it matches
+        # 2020-06-15T10:30:00 UTC = 132366906000000000 ticks
+        assert isinstance(data["creation_time"], int)
+        assert data["creation_time"] == 132366906000000000
 
     def test_parse_volume_metadata_roundtrip(self, tmp_path):
         lnk = tmp_path / "vol.lnk"

@@ -1,5 +1,6 @@
 """Build Windows .lnk files per the MS-SHLLINK spec -- pure struct packing."""
 
+import re as _re
 import struct
 import warnings
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from ._constants import (
     KNOWN_FOLDER_GUIDS,
     LINK_CLSID,
     SW_SHOWNORMAL,
+    WELL_KNOWN_SHORT_NAMES,
 )
 from ._types import TargetPath, Timestamp
 from ._util import parse_guid_str
@@ -31,12 +33,34 @@ _FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+def _resolve_timestamp(val: Timestamp) -> datetime | int | None:
+    """Normalise a Timestamp to datetime, int, or None.
+
+    Parses ISO 8601 and ``"YYYY-MM-DD HH:MM:SS UTC"`` strings into
+    timezone-aware datetime objects so callers (including roundtrip code
+    feeding old parser output) work transparently.
+    """
+    if val is None or isinstance(val, (int, datetime)):
+        return val
+    if isinstance(val, str):
+        if not val or val.startswith("0 "):
+            return None
+        s = val.replace(" UTC", "+00:00")
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt
+    raise TypeError(f"Expected None, int, datetime, or str, got {type(val).__name__}")
+
+
 def _to_filetime(val: Timestamp = None) -> bytes:
     """Convert *val* to 8-byte packed Windows FILETIME.
 
-    Accepts ``None`` (current UTC), ``int`` (raw 100-ns ticks), or
-    ``datetime`` (timezone-aware).
+    Accepts ``None`` (current UTC), ``int`` (raw 100-ns ticks),
+    ``datetime`` (timezone-aware), or ``str`` (ISO 8601 /
+    ``"YYYY-MM-DD HH:MM:SS UTC"`` format).
     """
+    val = _resolve_timestamp(val)
     if val is None:
         td = datetime.now(timezone.utc) - _FILETIME_EPOCH
     elif isinstance(val, int):
@@ -56,9 +80,10 @@ def _to_filetime(val: Timestamp = None) -> bytes:
 def _to_dos_datetime(val: Timestamp = None) -> tuple[int, int]:
     """Convert *val* to (date_word, time_word) DOS format.
 
-    Accepts ``None`` (current UTC), ``int`` (raw FILETIME ticks), or
-    ``datetime``.  Returns ``(uint16_date, uint16_time)``.
+    Accepts ``None`` (current UTC), ``int`` (raw FILETIME ticks),
+    ``datetime``, or ``str``.  Returns ``(uint16_date, uint16_time)``.
     """
+    val = _resolve_timestamp(val)
     if val is None:
         dt = datetime.now(timezone.utc)
     elif isinstance(val, int):
@@ -77,6 +102,59 @@ def _to_dos_datetime(val: Timestamp = None) -> tuple[int, int]:
     date_w = ((dt.year - 1980) << 9) | (dt.month << 5) | dt.day
     time_w = (dt.hour << 11) | (dt.minute << 5) | (dt.second // 2)
     return date_w, time_w
+
+
+# Characters not valid in 8.3 short names
+_INVALID_83 = _re.compile(r"[^A-Z0-9!#$%&\'()@^_`{}~-]")
+
+# Case-insensitive lookup for well-known 8.3 short names
+_KNOWN_SHORT: dict[str, str] = {k.upper(): v for k, v in WELL_KNOWN_SHORT_NAMES.items()}
+
+
+def _generate_short_name(long_name: str) -> str:
+    """Return the 8.3 short name for a long filename.
+
+    Checks the well-known short name table first (covers standard Windows
+    directories like ``Program Files`` -> ``PROGRA~1``).  Falls back to the
+    VFAT mangling algorithm for unknown names: strip invalid characters,
+    uppercase, truncate to 6 chars + ``~1``, keep the first 3 extension chars.
+    Returns the long name uppercased if it already fits 8.3 constraints.
+    """
+    # Well-known Windows directory names have fixed short names
+    known = _KNOWN_SHORT.get(long_name.upper())
+    if known is not None:
+        return known
+
+    name = long_name.upper()
+
+    # Split name and extension at the last dot
+    if "." in name and not name.startswith("."):
+        base, ext = name.rsplit(".", 1)
+    else:
+        base = name
+        ext = ""
+
+    # Strip characters invalid in 8.3 names
+    clean_base = _INVALID_83.sub("", base)
+    clean_ext = _INVALID_83.sub("", ext)[:3]
+
+    # Check if the name already fits 8.3 constraints
+    needs_mangling = (
+        len(clean_base) != len(base)
+        or len(clean_ext) != len(ext)
+        or len(base) > 8
+        or len(ext) > 3
+        or " " in long_name
+    )
+
+    if not needs_mangling:
+        return long_name.upper()
+
+    # Truncate base to 6 chars and append ~1
+    short_base = clean_base[:6] + "~1"
+    if clean_ext:
+        return f"{short_base}.{clean_ext}"
+    return short_base
 
 
 def _counted_utf16(s: str, *, max_length: int = 0) -> bytes:
@@ -135,7 +213,16 @@ def _id_network_share(share_path: str) -> bytes:
     return struct.pack("<H", len(body) + 2) + bytes(body)
 
 
-def _build_extension(name: str, mod_date: int, mod_time: int, base_size: int) -> bytes:
+def _build_extension(
+    name: str,
+    mod_date: int,
+    mod_time: int,
+    base_size: int,
+    created_date: int | None = None,
+    created_time: int | None = None,
+    accessed_date: int | None = None,
+    accessed_time: int | None = None,
+) -> bytes:
     """Build a version 9 BEEF0004 extension block for a shell item.
 
     Fields derived from reverse-engineering a real Win10/11 Chrome.lnk:
@@ -148,7 +235,22 @@ def _build_extension(name: str, mod_date: int, mod_time: int, base_size: int) ->
       +40: unknown (0)            +42: unknown/hash (uint32, 0)
       +46: unicode name (null-terminated UTF-16LE)
       trailing: base_size (uint16) -- back-reference to pre-extension item size
+
+    Args:
+        created_date/created_time: DOS date/time for the created timestamp.
+            Defaults to *mod_date*/*mod_time* if not specified.
+        accessed_date/accessed_time: DOS date/time for the accessed timestamp.
+            Defaults to *mod_date*/*mod_time* if not specified.
     """
+    if created_date is None:
+        created_date = mod_date
+    if created_time is None:
+        created_time = mod_time
+    if accessed_date is None:
+        accessed_date = mod_date
+    if accessed_time is None:
+        accessed_time = mod_time
+
     uname = name.encode("utf-16-le") + b"\x00\x00"
     total = EXT_HEADER_SIZE + len(uname) + 2  # +2 for trailing base_size
 
@@ -156,10 +258,10 @@ def _build_extension(name: str, mod_date: int, mod_time: int, base_size: int) ->
     ext += struct.pack("<H", total)  # +00 size
     ext += struct.pack("<H", EXT_VERSION)  # +02 version
     ext += struct.pack("<I", EXT_SIG)  # +04 signature
-    ext += struct.pack("<H", mod_date)  # +08 created date (reuse mod)
-    ext += struct.pack("<H", mod_time)  # +10 created time
-    ext += struct.pack("<H", mod_date)  # +12 accessed date
-    ext += struct.pack("<H", mod_time)  # +14 accessed time
+    ext += struct.pack("<H", created_date)  # +08 created date
+    ext += struct.pack("<H", created_time)  # +10 created time
+    ext += struct.pack("<H", accessed_date)  # +12 accessed date
+    ext += struct.pack("<H", accessed_time)  # +14 accessed time
     ext += struct.pack("<H", EXT_HEADER_SIZE)  # +16 unicode name offset
     ext += struct.pack("<H", 0)  # +18 unknown
     ext += b"\x00" * 8  # +20 NTFS MFT ref
@@ -179,24 +281,41 @@ def _id_fs_entry(
     file_size: int = 0,
     long_name: str | None = None,
     write_time: Timestamp = None,
+    created_time: Timestamp = None,
+    accessed_time: Timestamp = None,
+    file_attrs: int | None = None,
 ) -> bytes:
     """File-system item with version 9 BEEF0004 extension block.
 
     Args:
-        name:       Short name (8.3 format), encoded with the ANSI code page.
-        is_dir:     True for directory entries, False for file entries.
-        file_size:  File size in bytes (used for file entries).
-        long_name:  Unicode long name for the BEEF0004 extension block.
-                    Defaults to name if not provided.
-        write_time: Optional timestamp for the item (None, int, or datetime).
+        name:          Short name (8.3 format), encoded with the ANSI code page.
+        is_dir:        True for directory entries, False for file entries.
+        file_size:     File size in bytes (used for file entries).
+        long_name:     Unicode long name for the BEEF0004 extension block.
+                       Defaults to name if not provided.
+        write_time:    Optional modification timestamp (None, int, datetime, str).
+        created_time:  Optional creation timestamp for BEEF0004 extension.
+                       Defaults to write_time if not specified.
+        accessed_time: Optional access timestamp for BEEF0004 extension.
+                       Defaults to write_time if not specified.
+        file_attrs:    File attributes (uint16) for the IDList item.  Defaults
+                       to 0x10 (DIRECTORY) for dirs or 0x20 (ARCHIVE) for files.
     """
     if long_name is None:
         long_name = name
 
     mod_date, mod_time = _to_dos_datetime(write_time)
+    if created_time is not None:
+        cr_date, cr_time = _to_dos_datetime(created_time)
+    else:
+        cr_date, cr_time = None, None
+    if accessed_time is not None:
+        ac_date, ac_time = _to_dos_datetime(accessed_time)
+    else:
+        ac_date, ac_time = None, None
 
     type_byte = 0x31 if is_dir else 0x32
-    attrs = 0x10 if is_dir else 0x20
+    attrs = file_attrs if file_attrs is not None else (0x10 if is_dir else 0x20)
 
     # Base body: type + pad + fsize + date + time + attrs + shortname + pad
     base = bytearray()
@@ -210,13 +329,26 @@ def _id_fs_entry(
         base += b"\x00"
 
     base_size = len(base) + 2  # including the 2-byte item size prefix
-    ext = _build_extension(long_name, mod_date, mod_time, base_size)
+    ext = _build_extension(
+        long_name,
+        mod_date,
+        mod_time,
+        base_size,
+        created_date=cr_date,
+        created_time=cr_time,
+        accessed_date=ac_date,
+        accessed_time=ac_time,
+    )
     body = bytes(base) + ext
     return struct.pack("<H", len(body) + 2) + body
 
 
 def _build_fs_items(
-    path_parts: list, file_size: int = 0, write_time: Timestamp = None
+    path_parts: list,
+    file_size: int = 0,
+    write_time: Timestamp = None,
+    created_time: Timestamp = None,
+    accessed_time: Timestamp = None,
 ) -> bytes:
     """Build filesystem shell items for a sequence of path segments."""
     items = bytearray()
@@ -224,17 +356,33 @@ def _build_fs_items(
         is_dir = i < len(path_parts) - 1
         entry_size = file_size if not is_dir else 0
         if isinstance(segment, tuple):
-            short_name, long_name = segment
+            if len(segment) == 2:
+                short_name, long_name = segment
+                item_attrs = None
+            else:
+                short_name, long_name, item_attrs = segment
             items += _id_fs_entry(
                 short_name,
                 is_dir,
                 file_size=entry_size,
                 long_name=long_name,
                 write_time=write_time,
+                created_time=created_time,
+                accessed_time=accessed_time,
+                file_attrs=item_attrs,
             )
         else:
+            # Auto-generate 8.3 short name from the long name
+            short_name = _generate_short_name(segment)
+            long_name = segment if short_name != segment else None
             items += _id_fs_entry(
-                segment, is_dir, file_size=entry_size, write_time=write_time
+                short_name,
+                is_dir,
+                file_size=entry_size,
+                long_name=long_name,
+                write_time=write_time,
+                created_time=created_time,
+                accessed_time=accessed_time,
             )
     return bytes(items)
 
@@ -252,28 +400,44 @@ def _parse_target_path(target_path: TargetPath) -> tuple[str, list]:
 
 
 def _build_idlist(
-    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+    target_path: TargetPath,
+    file_size: int = 0,
+    write_time: Timestamp = None,
+    created_time: Timestamp = None,
+    accessed_time: Timestamp = None,
 ) -> bytes:
     """Full LinkTargetIDList section for an absolute Windows path.
 
     Args:
-        target_path: Absolute Windows path. Each component can be a plain
-                     string or a (short_name, long_name) tuple for 8.3
-                     short name support.
-        file_size:   Size of the target file (applied to the final entry).
-        write_time:  Optional timestamp for IDList items (None, int, or datetime).
+        target_path:   Absolute Windows path. Each component can be a plain
+                       string or a (short_name, long_name) tuple for 8.3
+                       short name support.
+        file_size:     Size of the target file (applied to the final entry).
+        write_time:    Optional timestamp for IDList items.
+        created_time:  Optional creation timestamp for BEEF0004 extensions.
+        accessed_time: Optional access timestamp for BEEF0004 extensions.
     """
     drive, path_parts = _parse_target_path(target_path)
     items = bytearray()
     items += _id_root()
     items += _id_drive(drive)
-    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
+    items += _build_fs_items(
+        path_parts,
+        file_size=file_size,
+        write_time=write_time,
+        created_time=created_time,
+        accessed_time=accessed_time,
+    )
     items += struct.pack("<H", 0)  # terminator
     return struct.pack("<H", len(items)) + items
 
 
 def _build_idlist_unc(
-    unc_path: str, file_size: int = 0, write_time: Timestamp = None
+    unc_path: str,
+    file_size: int = 0,
+    write_time: Timestamp = None,
+    created_time: Timestamp = None,
+    accessed_time: Timestamp = None,
 ) -> bytes:
     """Full LinkTargetIDList for a UNC path like ``\\\\server\\share\\...``."""
     parts = unc_path.lstrip("\\").split("\\")
@@ -288,13 +452,23 @@ def _build_idlist_unc(
     items = bytearray()
     items += _id_network_root()
     items += _id_network_share(share_path)
-    items += _build_fs_items(fs_parts, file_size=file_size, write_time=write_time)
+    items += _build_fs_items(
+        fs_parts,
+        file_size=file_size,
+        write_time=write_time,
+        created_time=created_time,
+        accessed_time=accessed_time,
+    )
     items += struct.pack("<H", 0)  # terminator
     return struct.pack("<H", len(items)) + items
 
 
 def _build_idlist_items(
-    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+    target_path: TargetPath,
+    file_size: int = 0,
+    write_time: Timestamp = None,
+    created_time: Timestamp = None,
+    accessed_time: Timestamp = None,
 ) -> bytes:
     """Build just the IDList item bytes (no outer size prefix).
 
@@ -304,13 +478,23 @@ def _build_idlist_items(
     items = bytearray()
     items += _id_root()
     items += _id_drive(drive)
-    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
+    items += _build_fs_items(
+        path_parts,
+        file_size=file_size,
+        write_time=write_time,
+        created_time=created_time,
+        accessed_time=accessed_time,
+    )
     items += struct.pack("<H", 0)  # terminator
     return bytes(items)
 
 
 def _build_idlist_stomp_dot(
-    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+    target_path: TargetPath,
+    file_size: int = 0,
+    write_time: Timestamp = None,
+    created_time: Timestamp = None,
+    accessed_time: Timestamp = None,
 ) -> bytes:
     """IDList with a trailing period on the final item name (MotW stomp).
 
@@ -318,24 +502,35 @@ def _build_idlist_stomp_dot(
     which rewrites the .lnk and drops the Mark-of-the-Web ADS.
     """
     drive, path_parts = _parse_target_path(target_path)
-    # Append dot to the final segment name(s)
+    # Append dot to the final segment name(s).  Use a tuple to bypass
+    # auto short-name generation so the dotted name is preserved as-is.
     if path_parts:
         last = path_parts[-1]
         if isinstance(last, tuple):
             path_parts[-1] = (last[0] + ".", last[1] + ".")
         else:
-            path_parts[-1] = last + "."
+            path_parts[-1] = (last + ".", last + ".")
 
     items = bytearray()
     items += _id_root()
     items += _id_drive(drive)
-    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
+    items += _build_fs_items(
+        path_parts,
+        file_size=file_size,
+        write_time=write_time,
+        created_time=created_time,
+        accessed_time=accessed_time,
+    )
     items += struct.pack("<H", 0)  # terminator
     return struct.pack("<H", len(items)) + items
 
 
 def _build_idlist_stomp_relative(
-    target_path: TargetPath, file_size: int = 0, write_time: Timestamp = None
+    target_path: TargetPath,
+    file_size: int = 0,
+    write_time: Timestamp = None,
+    created_time: Timestamp = None,
+    accessed_time: Timestamp = None,
 ) -> bytes:
     """IDList with root + drive but only the bare filename, triggering MotW stomp.
 
@@ -343,14 +538,22 @@ def _build_idlist_stomp_relative(
     rewrite the .lnk, stripping the Mark-of-the-Web ADS.
     """
     drive, path_parts = _parse_target_path(target_path)
-    # Keep only the last segment (the filename)
+    # Keep only the last segment (the filename).  Use a tuple to bypass
+    # auto short-name generation so the bare filename is preserved as-is.
     if path_parts:
-        path_parts = [path_parts[-1]]
+        last = path_parts[-1]
+        path_parts = [last] if isinstance(last, tuple) else [(last, last)]
 
     items = bytearray()
     items += _id_root()
     items += _id_drive(drive)
-    items += _build_fs_items(path_parts, file_size=file_size, write_time=write_time)
+    items += _build_fs_items(
+        path_parts,
+        file_size=file_size,
+        write_time=write_time,
+        created_time=created_time,
+        accessed_time=accessed_time,
+    )
     items += struct.pack("<H", 0)  # terminator
     return struct.pack("<H", len(items)) + items
 
@@ -853,14 +1056,22 @@ def build_lnk(
     pad_size: int = 0,
     append_data: bytes = b"",
     stomp_motw: str = "",
+    disable_known_folder_tracking: bool = True,
+    force_no_link_info: bool = False,
+    run_as_user: bool = False,
+    enable_target_metadata: bool = False,
+    prefer_environment_path: bool = False,
 ) -> bytes:
     """Return the raw bytes of a complete .lnk file.
 
     Args:
         target:          Full Windows path string, OR a list of path
                          segments for 8.3 short name support. List form:
-                         ["C", ("PROGRA~1", "Program Files"), "subdir", ...]
-                         where each element is a string or (short, long) tuple.
+                         ``["C", ("PROGRA~1", "Program Files"), "subdir", ...]``
+                         where each element is a string, a ``(short, long)``
+                         tuple, or a ``(short, long, attrs)`` triple (attrs
+                         is a uint16 file-attribute value for the IDList item,
+                         e.g. ``0x0011`` for READONLY|DIRECTORY).
                          UNC paths (starting with ``\\\\``) are supported.
         icon_location:   Full Windows path to the icon source (StringData).
         icon_env_path:   Icon path with env vars for IconEnvironmentDataBlock.
@@ -879,11 +1090,13 @@ def build_lnk(
         hotkey_mod:      Modifier mask (0x02=CTRL, 0x01=SHIFT, 0x04=ALT).
         link_flags:      Additional LinkFlags bits to OR into the auto-computed
                          flags (e.g. 0x00040000 for ForceNoLinkTrack).
-        creation_time:   Header CreationTime. None (current UTC), int (raw
-                         FILETIME ticks), or datetime. Default None.
-        access_time:     Header AccessTime.  Same types as creation_time.
-        write_time:      Header WriteTime and IDList item timestamps.  Same
-                         types as creation_time.
+        creation_time:   Header CreationTime and IDList BEEF0004 created date.
+                         None (current UTC), int (raw FILETIME ticks),
+                         datetime, or str (ISO 8601 / parser output).
+        access_time:     Header AccessTime and IDList BEEF0004 accessed date.
+                         Same types as creation_time.
+        write_time:      Header WriteTime and IDList item modification date.
+                         Same types as creation_time.
         tracker_machine_id:          Tracker MachineID (ASCII, max 15 chars).
         tracker_droid_volume_id:     Tracker DroidVolumeID (GUID string).
         tracker_droid_file_id:       Tracker DroidFileID (GUID string).
@@ -929,6 +1142,14 @@ def build_lnk(
                          (CVE-2024-38217).  ``"dot"`` appends a period to the
                          final target filename; ``"relative"`` uses a bare
                          filename without drive/directory path segments.
+        disable_known_folder_tracking: Set DisableKnownFolderTracking flag
+                         (bit 21).  Defaults to True to match real Windows
+                         .lnk files (71% of real files have this set).
+        force_no_link_info: Set ForceNoLinkInfo flag (bit 8).  The LinkInfo
+                         section is still written but parsers MUST ignore it.
+        run_as_user:     Set RunAsUser flag (bit 13).  Target runs elevated.
+        enable_target_metadata: Set EnableTargetMetadata flag (bit 19).
+        prefer_environment_path: Set PreferEnvironmentPath flag (bit 25).
     """
     # -- Argument padding (ZDI-CAN-25373) --
     if pad_args > 0:
@@ -982,14 +1203,24 @@ def build_lnk(
         flags |= 0x00000020  # HasArguments
     if icon_location:
         flags |= 0x00000040  # HasIconLocation
+    if force_no_link_info:
+        flags |= 0x00000100  # ForceNoLinkInfo
     if env_target_path:
         flags |= 0x00000200  # HasExpString
-    if icon_env_path:
-        flags |= 0x00004000  # HasExpIcon
     if darwin_data:
         flags |= 0x00001000  # HasDarwinID
+    if run_as_user:
+        flags |= 0x00002000  # RunAsUser
+    if icon_env_path:
+        flags |= 0x00004000  # HasExpIcon
     if shim_layer_name:
         flags |= 0x00020000  # RunWithShimLayer
+    if enable_target_metadata:
+        flags |= 0x00080000  # EnableTargetMetadata
+    if disable_known_folder_tracking:
+        flags |= 0x00200000  # DisableKnownFolderTracking
+    if prefer_environment_path:
+        flags |= 0x02000000  # PreferEnvironmentPath
     if is_unc:
         flags |= 0x04000000  # KeepLocalIDListForUNCTarget
     flags |= link_flags  # merge caller-supplied additional bits
@@ -1018,8 +1249,13 @@ def build_lnk(
 
     out = bytearray(hdr)
 
+    _ts = dict(
+        write_time=write_time,
+        created_time=creation_time,
+        accessed_time=access_time,
+    )
     if is_unc:
-        out += _build_idlist_unc(target, file_size=file_size, write_time=write_time)
+        out += _build_idlist_unc(target, file_size=file_size, **_ts)
         out += _build_linkinfo_unc(
             target,
             device_name=network_device_name,
@@ -1027,15 +1263,11 @@ def build_lnk(
         )
     else:
         if stomp_motw == "dot":
-            out += _build_idlist_stomp_dot(
-                target, file_size=file_size, write_time=write_time
-            )
+            out += _build_idlist_stomp_dot(target, file_size=file_size, **_ts)
         elif stomp_motw == "relative":
-            out += _build_idlist_stomp_relative(
-                target, file_size=file_size, write_time=write_time
-            )
+            out += _build_idlist_stomp_relative(target, file_size=file_size, **_ts)
         else:
-            out += _build_idlist(target, file_size=file_size, write_time=write_time)
+            out += _build_idlist(target, file_size=file_size, **_ts)
         out += _build_linkinfo(
             target_path_str,
             vol_label=volume_label,
@@ -1083,7 +1315,7 @@ def build_lnk(
     if known_folder_id:
         out += _build_known_folder_block(known_folder_id, known_folder_offset)
     if vista_idlist is not None:
-        idlist_items = _build_idlist_items(vista_idlist, write_time=write_time)
+        idlist_items = _build_idlist_items(vista_idlist, **_ts)
         out += _build_vista_idlist_block(idlist_items)
     if property_stores:
         out += _build_property_store_block(property_stores)

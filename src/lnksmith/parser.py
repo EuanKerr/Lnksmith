@@ -65,16 +65,21 @@ def _dos_time_str(val: int) -> str:
     return f"{hour:02d}:{minute:02d}:{sec:02d}"
 
 
-def _filetime_to_str(data: bytes, off: int) -> str:
-    ft = struct.unpack_from("<Q", data, off)[0]
-    if ft == 0:
+def _filetime_raw(data: bytes, off: int) -> int:
+    """Read an 8-byte FILETIME at *off* and return raw 100-ns ticks (int)."""
+    return struct.unpack_from("<Q", data, off)[0]
+
+
+def _filetime_to_str(ticks: int) -> str:
+    """Format raw FILETIME ticks as a human-readable string."""
+    if ticks == 0:
         return "0 (unset)"
-    unix_ts = (ft - FILETIME_UNIX_EPOCH_DELTA) / 10_000_000
+    unix_ts = (ticks - FILETIME_UNIX_EPOCH_DELTA) / 10_000_000
     try:
         dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
     except (OSError, OverflowError, ValueError):
-        return f"0x{ft:016X}"
+        return f"0x{ticks:016X}"
 
 
 def _decode_flags(val: int) -> list[str]:
@@ -136,9 +141,9 @@ class LnkInfo:
     flags: int = 0
     flag_names: list[str] = field(default_factory=list)
     file_attributes: int = 0
-    creation_time: str = ""
-    access_time: str = ""
-    write_time: str = ""
+    creation_time: int = 0
+    access_time: int = 0
+    write_time: int = 0
     file_size: int = 0
     icon_index: int = 0
     show_command: int = 0
@@ -342,7 +347,8 @@ def _parse_typed_value(data: bytes, off: int, end: int) -> tuple[object, int]:
     elif vtype == 0x0040:  # VT_FILETIME
         if val_off + 8 > end:
             return None, vtype
-        return _filetime_to_str(data, val_off), vtype
+        ticks = _filetime_raw(data, val_off)
+        return _filetime_to_str(ticks), vtype
     elif vtype == 0x0048:  # VT_CLSID
         if val_off + 16 > end:
             return None, vtype
@@ -420,9 +426,9 @@ def parse_lnk(source: str | Path | bytes) -> LnkInfo:
     info.flags = _read_u32(data, 20)
     info.flag_names = _decode_flags(info.flags)
     info.file_attributes = _read_u32(data, 24)
-    info.creation_time = _filetime_to_str(data, 28)
-    info.access_time = _filetime_to_str(data, 36)
-    info.write_time = _filetime_to_str(data, 44)
+    info.creation_time = _filetime_raw(data, 28)
+    info.access_time = _filetime_raw(data, 36)
+    info.write_time = _filetime_raw(data, 44)
     info.file_size = _read_u32(data, 52)
     info.icon_index = _read_i32(data, 56)
     raw_show = _read_u32(data, 60)
@@ -893,9 +899,9 @@ def format_lnk(info: LnkInfo) -> str:
     for bit, name in FILE_ATTR_NAMES.items():
         if info.file_attributes & (1 << bit):
             lines.append(f"    - {name}")
-    lines.append(f"  CreationTime:    {info.creation_time}")
-    lines.append(f"  AccessTime:      {info.access_time}")
-    lines.append(f"  WriteTime:       {info.write_time}")
+    lines.append(f"  CreationTime:    {_filetime_to_str(info.creation_time)}")
+    lines.append(f"  AccessTime:      {_filetime_to_str(info.access_time)}")
+    lines.append(f"  WriteTime:       {_filetime_to_str(info.write_time)}")
     lines.append(f"  FileSize:        {info.file_size} (0x{info.file_size:08X})")
     lines.append(f"  IconIndex:       {info.icon_index}")
     lines.append(f"  ShowCommand:     {info.show_command} ({info.show_command_name})")

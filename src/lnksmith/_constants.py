@@ -271,6 +271,29 @@ KNOWN_FOLDER_GUIDS = {
 KNOWN_FOLDER_NAMES = {v: k for k, v in KNOWN_FOLDER_GUIDS.items()}
 
 # ---------------------------------------------------------------------------
+# Well-known 8.3 short names (Windows default installations)
+# ---------------------------------------------------------------------------
+# On NTFS the ~N suffix depends on filesystem creation order, but these
+# directory names are created during OS setup in a fixed order, so their
+# short names are stable across all standard Windows installations.
+# Only entries whose short names are consistent across Windows versions
+# are included; names whose ~N suffix varies (e.g. "Windows Defender",
+# "Windows Media Player") should use explicit (short, long) tuples in
+# the target path instead.
+WELL_KNOWN_SHORT_NAMES: dict[str, str] = {
+    "Program Files": "PROGRA~1",
+    "Program Files (x86)": "PROGRA~2",
+    "ProgramData": "PROGRA~3",
+    "Documents and Settings": "DOCUME~1",
+    "Application Data": "APPLIC~1",
+    "Local Settings": "LOCALS~1",
+    "Start Menu": "STARTM~1",
+    "Common Files": "COMMON~1",
+    "Internet Explorer": "INTERN~1",
+    "Administrative Tools": "ADMINI~1",
+}
+
+# ---------------------------------------------------------------------------
 # VARIANT types used in Serialized Property Store
 # ---------------------------------------------------------------------------
 VT_TYPES = {

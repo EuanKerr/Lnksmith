@@ -82,7 +82,12 @@ class TestFlagEncoding:
     def test_no_optional_flags_when_empty(self):
         data = build_lnk(target=r"C:\test.exe")
         flags = struct.unpack_from("<I", data, 20)[0]
-        # Only IDList + LinkInfo + IsUnicode
+        # IDList + LinkInfo + IsUnicode + DisableKnownFolderTracking (default)
+        assert flags == 0x200083
+
+    def test_disable_known_folder_tracking_off(self):
+        data = build_lnk(target=r"C:\test.exe", disable_known_folder_tracking=False)
+        flags = struct.unpack_from("<I", data, 20)[0]
         assert flags == 0x83
 
 
@@ -154,6 +159,53 @@ class TestListTarget:
         # Basic structural check
         assert struct.unpack_from("<I", short_name_lnk_bytes, 0)[0] == 0x4C
         assert short_name_lnk_bytes[-4:] == b"\x00\x00\x00\x00"
+
+
+class TestWellKnownShortNames:
+    """Verify _generate_short_name uses the well-known lookup table."""
+
+    def test_program_files_lookup(self):
+        from lnksmith.builder import _generate_short_name
+
+        assert _generate_short_name("Program Files") == "PROGRA~1"
+
+    def test_program_files_x86_lookup(self):
+        from lnksmith.builder import _generate_short_name
+
+        assert _generate_short_name("Program Files (x86)") == "PROGRA~2"
+
+    def test_case_insensitive_lookup(self):
+        from lnksmith.builder import _generate_short_name
+
+        assert _generate_short_name("program files") == "PROGRA~1"
+        assert _generate_short_name("PROGRAM FILES") == "PROGRA~1"
+
+    def test_common_files_lookup(self):
+        from lnksmith.builder import _generate_short_name
+
+        assert _generate_short_name("Common Files") == "COMMON~1"
+
+    def test_unknown_name_falls_back_to_generation(self):
+        from lnksmith.builder import _generate_short_name
+
+        # Not in the table, should use the VFAT algorithm
+        result = _generate_short_name("Some Long Directory Name")
+        assert result == "SOMELO~1"
+
+    def test_simple_name_unchanged(self):
+        from lnksmith.builder import _generate_short_name
+
+        assert _generate_short_name("Windows") == "WINDOWS"
+        assert _generate_short_name("cmd.exe") == "CMD.EXE"
+
+    def test_string_target_uses_lookup(self):
+        """Auto-derived short names for string targets use the lookup table."""
+        from lnksmith.parser import parse_lnk
+
+        data = build_lnk(target=r"C:\Program Files\test.exe")
+        parse_lnk(data)  # verify round-trip parses without error
+        # IDList should contain PROGRA~1 as the ANSI short name
+        assert b"PROGRA~1" in data
 
 
 # ---- MS-SHLLINK v10 feature tests ----
@@ -579,8 +631,9 @@ class TestStompMotW:
             target=r"C:\Windows\System32\powershell.exe",
             stomp_motw="dot",
         )
-        # The IDList should contain the dotted filename
-        assert b"powershell.exe." in data
+        # The IDList should contain the dotted filename (UTF-16LE in BEEF0004)
+        dotted_utf16 = "powershell.exe.".encode("utf-16-le")
+        assert dotted_utf16 in data
 
     def test_stomp_dot_with_short_names(self):
         data = build_lnk(

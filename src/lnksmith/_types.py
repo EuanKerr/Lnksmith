@@ -2,5 +2,5 @@
 
 from datetime import datetime
 
-TargetPath = str | list[str | tuple[str, str]]
-Timestamp = int | datetime | None
+TargetPath = str | list[str | tuple[str, str] | tuple[str, str, int]]
+Timestamp = int | datetime | str | None
