@@ -3,7 +3,7 @@
 import struct
 import warnings
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ._constants import (
@@ -71,9 +71,9 @@ def _filetime_to_str(data: bytes, off: int) -> str:
         return "0 (unset)"
     unix_ts = (ft - FILETIME_UNIX_EPOCH_DELTA) / 10_000_000
     try:
-        dt = datetime.fromtimestamp(unix_ts, tz=UTC)
+        dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
         return dt.strftime("%Y-%m-%d %H:%M:%S UTC")
-    except OSError, OverflowError, ValueError:
+    except (OSError, OverflowError, ValueError):
         return f"0x{ft:016X}"
 
 

@@ -2,7 +2,7 @@
 
 import struct
 import warnings
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +25,7 @@ from ._util import parse_guid_str
 # ---------------------------------------------------------------------------
 # Timestamp epoch
 # ---------------------------------------------------------------------------
-_FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=UTC)
+_FILETIME_EPOCH = datetime(1601, 1, 1, tzinfo=timezone.utc)
 
 
 # ---------------------------------------------------------------------------
@@ -38,12 +38,14 @@ def _to_filetime(val: Timestamp = None) -> bytes:
     ``datetime`` (timezone-aware).
     """
     if val is None:
-        td = datetime.now(UTC) - _FILETIME_EPOCH
+        td = datetime.now(timezone.utc) - _FILETIME_EPOCH
     elif isinstance(val, int):
         return struct.pack("<Q", val)
     elif isinstance(val, datetime):
         if val.tzinfo is None:
-            raise TypeError("datetime must be timezone-aware (e.g. tzinfo=UTC)")
+            raise TypeError(
+                "datetime must be timezone-aware (e.g. tzinfo=timezone.utc)"
+            )
         td = val - _FILETIME_EPOCH
     else:
         raise TypeError(f"Expected None, int, or datetime, got {type(val).__name__}")
@@ -58,13 +60,15 @@ def _to_dos_datetime(val: Timestamp = None) -> tuple[int, int]:
     ``datetime``.  Returns ``(uint16_date, uint16_time)``.
     """
     if val is None:
-        dt = datetime.now(UTC)
+        dt = datetime.now(timezone.utc)
     elif isinstance(val, int):
         unix_ts = (val - FILETIME_UNIX_EPOCH_DELTA) / 10_000_000
-        dt = datetime.fromtimestamp(unix_ts, tz=UTC)
+        dt = datetime.fromtimestamp(unix_ts, tz=timezone.utc)
     elif isinstance(val, datetime):
         if val.tzinfo is None:
-            raise TypeError("datetime must be timezone-aware (e.g. tzinfo=UTC)")
+            raise TypeError(
+                "datetime must be timezone-aware (e.g. tzinfo=timezone.utc)"
+            )
         dt = val
     else:
         raise TypeError(f"Expected None, int, or datetime, got {type(val).__name__}")
@@ -623,6 +627,9 @@ def _build_property_store_block(stores: list[dict[str, object]]) -> bytes:
         for prop in store_def.get("properties", []):
             storage += _serialize_property(prop)
 
+        # Terminal property record (4 zero bytes, per MS-PROPSTORE)
+        storage += struct.pack("<I", 0)
+
         struct.pack_into("<I", storage, 0, len(storage))
         body += storage
 
@@ -653,10 +660,15 @@ def _serialize_property(prop: dict[str, object]) -> bytes:
         char_count = len(encoded) // 2
         typed += struct.pack("<I", char_count)
         typed += encoded
+        # Pad string data to 4-byte alignment (MS-PROPSTORE)
+        pad = (4 - len(encoded) % 4) % 4
+        typed += b"\x00" * pad
     elif vtype == 0x001E:  # VT_LPSTR
         encoded = value.encode(ANSI_CODEPAGE) + b"\x00"
         typed += struct.pack("<I", len(encoded))
         typed += encoded
+        pad = (4 - len(encoded) % 4) % 4
+        typed += b"\x00" * pad
     elif vtype == 0x0002:  # VT_I2
         typed += struct.pack("<h", value)
         typed += b"\x00\x00"  # padding to 4-byte align
@@ -664,7 +676,7 @@ def _serialize_property(prop: dict[str, object]) -> bytes:
         typed += struct.pack("<I", value)
     elif vtype == 0x0003:  # VT_I4
         typed += struct.pack("<i", value)
-    elif vtype == 0x0014:  # VT_UI8
+    elif vtype == 0x0014 or vtype == 0x0015:  # VT_I8, VT_UI8
         typed += struct.pack("<Q", value)
     elif vtype == 0x000B:  # VT_BOOL
         typed += struct.pack("<H", 0xFFFF if value else 0x0000)
@@ -673,6 +685,14 @@ def _serialize_property(prop: dict[str, object]) -> bytes:
         typed += struct.pack("<Q", value)
     elif vtype == 0x0048:  # VT_CLSID
         typed += parse_guid_str(value)
+    elif vtype == 0x0000:  # VT_EMPTY
+        pass  # no value data
+    elif vtype == 0x0041:  # VT_BLOB
+        blob: bytes = bytes.fromhex(value) if isinstance(value, str) else bytes(value)  # type: ignore[arg-type]
+        typed += struct.pack("<I", len(blob))
+        typed += blob
+        pad = (4 - len(blob) % 4) % 4
+        typed += b"\x00" * pad
 
     # Property record: ValueSize(4) + ID(4) + Reserved(1) + TypedValue
     value_size = 4 + 4 + 1 + len(typed)
@@ -815,6 +835,7 @@ def build_lnk(
     tracker_birth_droid_volume_id: str = "",
     tracker_birth_droid_file_id: str = "",
     known_folder_id: str = "",
+    known_folder_offset: int = 0,
     vista_idlist: TargetPath | None = None,
     property_stores: list[dict[str, object]] | None = None,
     darwin_data: str = "",
@@ -869,6 +890,7 @@ def build_lnk(
         tracker_birth_droid_volume_id: Tracker BirthDroidVolumeID (GUID string).
         tracker_birth_droid_file_id:   Tracker BirthDroidFileID (GUID string).
         known_folder_id: Known folder GUID or friendly name (e.g. "Desktop").
+        known_folder_offset: IDList byte offset for KnownFolderDataBlock.
         vista_idlist:    Path segments for VistaAndAboveIDListDataBlock (same
                          format as *target*).
         property_stores: List of dicts for PropertyStoreDataBlock. Each dict
@@ -1059,7 +1081,7 @@ def build_lnk(
             birth_droid_file_id=tracker_birth_droid_file_id,
         )
     if known_folder_id:
-        out += _build_known_folder_block(known_folder_id)
+        out += _build_known_folder_block(known_folder_id, known_folder_offset)
     if vista_idlist is not None:
         idlist_items = _build_idlist_items(vista_idlist, write_time=write_time)
         out += _build_vista_idlist_block(idlist_items)

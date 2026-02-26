@@ -20,7 +20,7 @@ jobs:
         with:
           fail-on-severity: high
 
-  build-and-test:
+  lint:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -33,6 +33,20 @@ jobs:
 
       - name: Lint
         run: uv run ruff check . && uv run ruff format --check .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - uses: astral-sh/setup-uv@eac588ad8def6316056a12d4907a9d4d84ff7a3b # v7.3.0
+
+      - run: uv python install ${{ matrix.python-version }}
+
+      - run: uv venv && uv pip install -e ".[dev]"
 
       - name: Run tests with coverage
         run: >-

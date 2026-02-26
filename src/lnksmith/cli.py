@@ -33,13 +33,13 @@ def _parse_timestamp(val: str) -> datetime | int | None:
     """Parse a CLI timestamp string into a datetime or int."""
     if not val:
         return None
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
 
     try:
         dt = datetime.fromisoformat(val)
         if dt.tzinfo is None:
-            return dt.replace(tzinfo=UTC)
-        return dt.astimezone(UTC)
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
     except ValueError:
         try:
             return int(val, 0)
@@ -243,11 +243,15 @@ def _cmd_parse(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> None:
+    # suggest_on_error and color require Python 3.14+
+    ap_kwargs: dict = {}
+    if sys.version_info >= (3, 14):
+        ap_kwargs["suggest_on_error"] = True
+        ap_kwargs["color"] = True
     parser = argparse.ArgumentParser(
         prog="lnksmith",
         description="Build and parse Windows .lnk files (MS-SHLLINK)",
-        suggest_on_error=True,
-        color=True,
+        **ap_kwargs,
     )
     sub = parser.add_subparsers(dest="command")
 

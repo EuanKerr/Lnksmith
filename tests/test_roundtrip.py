@@ -399,9 +399,9 @@ class TestRoundtripTimestamps:
     """GAP-B: Custom timestamps survive a round trip."""
 
     def test_datetime_timestamps(self):
-        from datetime import UTC, datetime
+        from datetime import datetime, timezone
 
-        ts = datetime(2020, 6, 15, 12, 30, 0, tzinfo=UTC)
+        ts = datetime(2020, 6, 15, 12, 30, 0, tzinfo=timezone.utc)
         data = build_lnk(
             target=r"C:\t.exe",
             creation_time=ts,
@@ -428,11 +428,11 @@ class TestRoundtripTimestamps:
         assert "unset" not in info.creation_time
 
     def test_independent_timestamps(self):
-        from datetime import UTC, datetime
+        from datetime import datetime, timezone
 
-        t1 = datetime(2019, 1, 1, 0, 0, 0, tzinfo=UTC)
-        t2 = datetime(2021, 6, 15, 0, 0, 0, tzinfo=UTC)
-        t3 = datetime(2023, 12, 31, 23, 59, 58, tzinfo=UTC)
+        t1 = datetime(2019, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+        t2 = datetime(2021, 6, 15, 0, 0, 0, tzinfo=timezone.utc)
+        t3 = datetime(2023, 12, 31, 23, 59, 58, tzinfo=timezone.utc)
         data = build_lnk(
             target=r"C:\t.exe",
             creation_time=t1,

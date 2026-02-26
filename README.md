@@ -10,7 +10,7 @@ files are valid on Windows.
 
 [MS-SHLLINK]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-shllink/
 
-Requires **Python 3.14+**.
+Requires **Python 3.12+**.
 
 ## Install
 
