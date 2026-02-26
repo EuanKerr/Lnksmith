@@ -33,6 +33,7 @@ classifiers = [
 Homepage = "https://github.com/EuanKerr/LNKsmith"
 Repository = "https://github.com/EuanKerr/LNKsmith"
 Issues = "https://github.com/EuanKerr/LNKsmith/issues"
+PyPI = "https://pypi.org/project/lnksmith/"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-cov", "ruff", "pre-commit"]

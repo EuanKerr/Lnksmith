@@ -1,5 +1,7 @@
 # LNKsmith
 
+[![PyPI](https://img.shields.io/pypi/v/lnksmith)](https://pypi.org/project/lnksmith/)
+
 Build and parse Windows `.lnk` shortcut files in Python.
 
 Implements the [MS-SHLLINK] specification using the
